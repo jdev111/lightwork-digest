@@ -140,6 +140,7 @@ load_env(ENV_PATH)
 
 CLOSE_API_KEY = os.environ.get("CLOSE_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+SKIP_CLAUDE = os.environ.get("SKIP_CLAUDE", "").strip() == "1"
 GRANOLA_CACHE = os.environ.get(
     "GRANOLA_CACHE",
     str(Path.home() / "Library/Application Support/Granola/cache-v3.json"),
@@ -364,10 +365,13 @@ def _get_lead_opp_status(lead_id):
     # Use a higher limit so we don't miss an older "won" stage due to pagination.
     data = close_get("/opportunity/", {"lead_id": lead_id, "_limit": 100})
     for opp in data.get("data", []):
-        status = (opp.get("status_label") or "").lower()
-        if status in WON_OPP_STATUSES:
+        status = (opp.get("status_label") or "").lower().strip()
+        status_type = (opp.get("status_type") or "").lower().strip()
+        # Close includes a normalized status_type ("won"/"lost"/"active") in many accounts.
+        # Treat any won opportunity as "won" regardless of the label spelling.
+        if status_type == "won" or status in WON_OPP_STATUSES:
             return "won"
-        if status in NURTURE_OPP_STATUSES:
+        if status_type == "lost" or status in NURTURE_OPP_STATUSES:
             return "nurture"
     return "active"
 
@@ -462,6 +466,7 @@ def get_leads_due_today(customer_leads):
         lead_info = info["lead_info"]
         lead_name = lead_info.get("display_name", "Unknown")
         cadence_type = info.get("cadence_type", "active")
+        transcript_label = info.get("transcript_label", "No")
 
         # Pick the right cadence
         cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
@@ -493,6 +498,7 @@ def get_leads_due_today(customer_leads):
             "owner_name": info["owner_name"],
             "cadence_type": cadence_type,
             "max_touches": max_touches,
+            "transcript_label": transcript_label,
         })
 
         if next_fu > max_touches:
@@ -759,6 +765,65 @@ def extract_granola_notes(doc, transcripts_dict=None):
 
     return "\n\n".join(parts)
 
+def _granola_local_has_transcript(doc, transcripts_dict):
+    doc_id = (doc or {}).get("id", "")
+    if not doc_id or not transcripts_dict or doc_id not in transcripts_dict:
+        return False
+    entries = transcripts_dict.get(doc_id)
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if (entry.get("text") or "").strip():
+            return True
+    return False
+
+
+def _granola_local_has_notes(doc):
+    if not doc:
+        return False
+    typed_notes = (doc.get("notes_markdown") or doc.get("notes_plain") or "").strip()
+    if typed_notes:
+        return True
+    notes_json = doc.get("notes")
+    if isinstance(notes_json, dict):
+        return bool(_extract_text_from_prosemirror(notes_json).strip())
+    return False
+
+
+def get_granola_match(meeting, sheet_rows, granola_docs):
+    """Return (source, match_obj) where source is 'sheet', 'local', or None."""
+    if sheet_rows:
+        sheet_match = match_granola_sheet(meeting, sheet_rows)
+        if sheet_match:
+            return "sheet", sheet_match
+    if granola_docs:
+        local_match = match_granola(meeting, granola_docs)
+        if local_match:
+            return "local", local_match
+    return None, None
+
+
+def get_transcript_label(source, match_obj, granola_transcripts):
+    """Human-friendly label for tracker view based on transcript presence."""
+    if source == "sheet":
+        transcript = ((match_obj or {}).get("Transcript") or "").strip()
+        notes = ((match_obj or {}).get("Notes") or "").strip()
+        if transcript:
+            return "Yes (Sheet)"
+        if notes:
+            return "Notes only"
+        return "No"
+    if source == "local":
+        if _granola_local_has_transcript(match_obj, granola_transcripts):
+            return "Yes (Local)"
+        if _granola_local_has_notes(match_obj):
+            return "Notes only"
+        # Many Granola docs are created from calendar events without a recording.
+        if match_obj and match_obj.get("valid_meeting") and not match_obj.get("audio_file_handle"):
+            return "No (not recorded)"
+        return "No"
+    return "No"
+
 
 def _extract_text_from_prosemirror(node):
     """Recursively extract text from a ProseMirror-style JSON doc."""
@@ -980,6 +1045,7 @@ def build_tracker_view(all_leads_status):
             cadence_type = entry.get("cadence_type", "active")
             max_touches = entry.get("max_touches", 7)
             cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
+            transcript_label = entry.get("transcript_label", "No")
 
             # Nurture badge
             nurture_badge = ""
@@ -1023,6 +1089,7 @@ def build_tracker_view(all_leads_status):
             rows_html += f"""
             <tr style="border-bottom:1px solid #eee;">
               <td style="padding:8px 10px; font-size:13px;">{name_link}{nurture_badge}</td>
+              <td style="padding:8px 6px; font-size:12px; text-align:center; color:#666;">{transcript_label}</td>
               <td style="padding:8px 6px; font-size:13px; text-align:center;">{fu_done}/{max_touches}</td>
               <td style="padding:8px 6px;">{dots}</td>
               <td style="padding:8px 6px; font-size:12px; text-align:center;">{status}<br>{next_due}</td>
@@ -1038,6 +1105,7 @@ def build_tracker_view(all_leads_status):
           <table style="width:100%; border-collapse:collapse;">
             <tr style="border-bottom:2px solid #ddd;">
               <th style="padding:6px 10px; text-align:left; font-size:11px; color:#888; text-transform:uppercase;">Lead</th>
+              <th style="padding:6px 6px; text-align:center; font-size:11px; color:#888; text-transform:uppercase;">Transcript</th>
               <th style="padding:6px 6px; text-align:center; font-size:11px; color:#888; text-transform:uppercase;">FU</th>
               <th style="padding:6px 6px; text-align:left; font-size:11px; color:#888; text-transform:uppercase;">Progress</th>
               <th style="padding:6px 6px; text-align:center; font-size:11px; color:#888; text-transform:uppercase;">Status</th>
@@ -1205,6 +1273,23 @@ def main():
         print("No Customer Leads with recent calls. Nothing to digest.")
         return
 
+    # 2. Load Granola transcripts early so the tracker can show transcript status.
+    print("\nLoading Granola transcripts...")
+    sheet_rows = load_granola_sheet()
+    print(f"  {len(sheet_rows)} rows from Google Sheet")
+
+    granola_docs, granola_transcripts = load_granola_cache()
+    print(f"  {len(granola_docs)} docs from local Granola cache")
+
+    # Annotate each lead with transcript status for tracker view
+    for lead_id, info in customer_leads.items():
+        earliest_meeting = min(
+            info["meetings"],
+            key=lambda m: m.get("starts_at", ""),
+        )
+        src, match_obj = get_granola_match(earliest_meeting, sheet_rows, granola_docs)
+        info["transcript_label"] = get_transcript_label(src, match_obj, granola_transcripts)
+
     # 3. Determine which leads need follow-up today
     print(f"\nChecking follow-up status for {len(customer_leads)} leads...")
     due_leads, all_leads_status = get_leads_due_today(customer_leads)
@@ -1229,15 +1314,7 @@ def main():
     else:
         print(f"\n{total_due} leads due for follow-up today")
 
-    # 4. Load Granola transcripts (both sources - Sheet + local cache)
-    print("\nLoading Granola transcripts...")
-    sheet_rows = load_granola_sheet()
-    print(f"  {len(sheet_rows)} rows from Google Sheet")
-
-    granola_docs, granola_transcripts = load_granola_cache()
-    print(f"  {len(granola_docs)} docs from local Granola cache")
-
-    # 5. Process each due lead
+    # 4. Process each due lead
     sections_by_owner = {}
 
     for i, entry in enumerate(due_leads):
@@ -1268,43 +1345,51 @@ def main():
 
         # Match to Granola: try Google Sheet first, then local cache
         call_notes = ""
-        granola_found = False
+        transcript_present = False
 
         if sheet_rows:
             sheet_match = match_granola_sheet(earliest_meeting, sheet_rows)
             if sheet_match:
                 call_notes = extract_sheet_notes(sheet_match)
-                granola_found = bool(call_notes)
-                if granola_found:
+                transcript_present = bool((sheet_match.get("Transcript") or "").strip())
+                if transcript_present:
                     print(f"  Transcript: Google Sheet match")
+                elif call_notes:
+                    print(f"  Notes: Google Sheet match")
 
-        if not granola_found and granola_docs:
+        if not transcript_present and not call_notes and granola_docs:
             local_match = match_granola(earliest_meeting, granola_docs)
             if local_match:
                 call_notes = extract_granola_notes(local_match, granola_transcripts)
-                granola_found = bool(call_notes)
-                if granola_found:
+                transcript_present = _granola_local_has_transcript(local_match, granola_transcripts)
+                if transcript_present:
                     print(f"  Transcript: Local cache match")
+                elif call_notes:
+                    print(f"  Notes: Local cache match")
 
-        if not granola_found:
+        if not transcript_present:
             print(f"  Transcript: None (will use Close.com data only)")
 
         # Generate FU-specific draft with Claude
         sent_emails = entry.get("sent_emails", [])
-        print(f"  Generating FU #{fu_number} draft ({len(sent_emails)} prior emails for context)...")
-        try:
-            claude_output = generate_digest_for_call(
-                lead_info, call_notes, earliest_meeting,
-                fu_number=fu_number, sent_emails=sent_emails,
-                cadence_type=cadence_type,
-            )
-        except Exception as e:
-            print(f"  Error from Claude: {e}")
-            claude_output = "(Error generating follow-up. Review this lead manually.)"
+        if SKIP_CLAUDE:
+            print("  SKIP_CLAUDE=1 set; skipping Claude generation")
+            claude_output = "(Skipped Claude generation; set SKIP_CLAUDE=0 to enable.)"
+        else:
+            print(f"  Generating FU #{fu_number} draft ({len(sent_emails)} prior emails for context)...")
+            try:
+                claude_output = generate_digest_for_call(
+                    lead_info, call_notes, earliest_meeting,
+                    fu_number=fu_number, sent_emails=sent_emails,
+                    cadence_type=cadence_type,
+                )
+            except Exception as e:
+                print(f"  Error from Claude: {e}")
+                claude_output = "(Error generating follow-up. Review this lead manually.)"
 
         # Build section
         section = build_lead_section(
-            lead_info, claude_output, granola_found,
+            lead_info, claude_output, transcript_present,
             fu_number=fu_number,
             fu_done=fu_done,
             days_since_call=days_since_call,
