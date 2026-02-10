@@ -176,6 +176,44 @@ OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/res
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-codex")
 OPENAI_REASONING_EFFORT = (os.environ.get("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
 
+# Link policy: avoid hallucinated or random product links in outreach emails.
+# Allowlist can be overridden with a comma-separated list of URL prefixes.
+DEFAULT_ALLOWED_URL_PREFIXES = [
+    "https://www.lightworkhome.com/examplereport",
+    "http://www.lightworkhome.com/examplereport",
+    "https://www.lightworkhome.com/blog-posts/wilkinson",
+    "https://www.lightworkhome.com/blog-posts/the-science-behind-lightwork",
+    "https://www.lightworkhome.com/reviews",
+]
+ALLOWED_URL_PREFIXES = [
+    s.strip()
+    for s in (os.environ.get("ALLOWED_URL_PREFIXES", "") or "").split(",")
+    if s.strip()
+] or DEFAULT_ALLOWED_URL_PREFIXES
+
+# Message quality (anti "AI slop") and safety checks.
+FORBIDDEN_PHRASES = [
+    "just checking in",
+    "circling back",
+    "touching base",
+    "reaching out to",
+    "hope this finds you well",
+    "per my last email",
+]
+
+# Keep this list short and high-signal; it triggers a rewrite if found.
+FORBIDDEN_TONE_MARKERS = [
+    "as an ai",
+    "i can't",
+    "i cannot",
+    "i don't have access",
+]
+
+MAX_EXCLAMATIONS = 1
+# These are soft caps; if exceeded we rewrite to be tighter.
+MAX_SENTENCES_BY_FU = {1: 6, 2: 5, 3: 7, 4: 6, 5: 6, 6: 6, 7: 6}
+MAX_WORDS_BY_FU = {1: 140, 2: 120, 3: 170, 4: 140, 5: 150, 6: 160, 7: 150}
+
 # ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
 # ---------------------------------------------------------------------------
@@ -215,6 +253,83 @@ def _request(method, url, headers=None, body=None, basic_auth=None):
         error_body = e.read().decode() if e.fp else ""
         print(f"HTTP {e.code} for {url}: {error_body[:300]}")
         raise
+
+
+def _extract_urls(text: str) -> list:
+    import re
+    if not text:
+        return []
+    urls = re.findall(r"https?://[^\s<>()\"']+", text)
+    # Also capture <a href="...">
+    urls += re.findall(r'href="(https?://[^"]+)"', text)
+    # Normalize + de-dupe preserving order
+    out = []
+    seen = set()
+    for u in urls:
+        u = u.strip()
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _sentence_count(text: str) -> int:
+    import re
+    s = (text or "").strip()
+    if not s:
+        return 0
+    # Approx: count ., ?, ! at end of clauses.
+    parts = re.split(r"[.!?]+(?:\s+|$)", s)
+    return len([p for p in parts if p.strip()])
+
+
+def _word_count(text: str) -> int:
+    import re
+    return len(re.findall(r"\b\w+\b", text or ""))
+
+
+def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None) -> list:
+    issues = []
+    d = (draft or "").strip()
+    dl = d.lower()
+
+    # Forbidden phrases (AI/corporate slop)
+    for p in FORBIDDEN_PHRASES:
+        if p in dl:
+            issues.append(f'Forbidden phrase: "{p}"')
+
+    for p in FORBIDDEN_TONE_MARKERS:
+        if p in dl:
+            issues.append(f'Forbidden tone marker: "{p}"')
+
+    # No assumptions: "today/yesterday" only if the call is actually recent.
+    if days_since_call is not None and days_since_call > 2:
+        if "today" in dl or "yesterday" in dl:
+            issues.append('Avoid "today/yesterday" when the call was not recent')
+
+    # Link allowlist
+    urls = _extract_urls(d)
+    disallowed = []
+    for u in urls:
+        if not any(u.startswith(pfx) for pfx in ALLOWED_URL_PREFIXES):
+            disallowed.append(u)
+    if disallowed:
+        issues.append("Disallowed link(s): " + ", ".join(disallowed[:5]))
+
+    # Tightness
+    max_sent = MAX_SENTENCES_BY_FU.get(int(fu_number), 6)
+    max_words = MAX_WORDS_BY_FU.get(int(fu_number), 150)
+    sc = _sentence_count(d)
+    wc = _word_count(d)
+    if sc > max_sent:
+        issues.append(f"Too many sentences ({sc} > {max_sent})")
+    if wc > max_words:
+        issues.append(f"Too long ({wc} words > {max_words})")
+
+    if d.count("!") > MAX_EXCLAMATIONS:
+        issues.append(f"Too many exclamation points (> {MAX_EXCLAMATIONS})")
+
+    return issues
 
 
 def _b64url(data: bytes) -> str:
@@ -1365,6 +1480,15 @@ def generate_digest_for_call(lead_info, call_notes, meeting, fu_number=1,
 
     cadence_label = "LONG-TERM NURTURE" if cadence_type == "nurture" else "ACTIVE"
 
+    meeting_starts_at = meeting.get("starts_at", "")
+    days_since_call = None
+    if meeting_starts_at:
+        try:
+            start_dt = datetime.fromisoformat(meeting_starts_at.replace("Z", "+00:00"))
+            days_since_call = (datetime.now(timezone.utc) - start_dt).days
+        except Exception:
+            days_since_call = None
+
     prompt = f"""You are writing follow-up #{fu_number} of {max_touches} for Jay at Lightwork Home Health, an environmental health consulting company.
 
 CADENCE TYPE: {cadence_label}
@@ -1418,6 +1542,10 @@ IMPORTANT RULES:
 - When mentioning the example report, always hyperlink it: <a href="https://www.lightworkhome.com/examplereport">example report</a> (password: homehealth)
 - Only include a value-driven health tip if the transcript explicitly mentions a related topic (e.g., they talked about sleep, EMFs, air quality, mold, baby monitors, etc.). If there's no transcript or the transcript doesn't touch a topic from the sales scripts, do NOT force a tip. Just write a clean follow-up without one.
 - Do NOT imply anything is scheduled or confirmed (no "looking forward to our visit", no specific dates) unless the transcript explicitly confirms it. Use optional next-step language instead (e.g., "If you'd like, we can...").
+- Do NOT use "today" or "yesterday" unless the call was actually within the last 2 days.
+- Do NOT use generic sales-email filler ("just checking in", "circling back", "touching base").
+- LINKS: Only include links from this allowlist. Otherwise, do not include a link.
+  Allowed prefixes: {", ".join(ALLOWED_URL_PREFIXES)}
 - Never use em dashes.
 - This is follow-up #{fu_number}. Do NOT repeat tips or resources from earlier follow-ups. Provide fresh value.
 
@@ -1430,6 +1558,93 @@ VALUE TIP REASONING:
 [If you included a health tip or resource, explain in 1 sentence why it's relevant to this lead. If none, write "No transcript match for a specific tip."]
 
 PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
+
+    def _call_model(p: str) -> str:
+        if AI_PROVIDER == "openai":
+            if not OPENAI_API_KEY:
+                raise RuntimeError("OPENAI_API_KEY missing (required for AI_PROVIDER=openai)")
+
+            body = {
+                "model": OPENAI_MODEL,
+                "input": p,
+                "reasoning": {"effort": OPENAI_REASONING_EFFORT},
+            }
+            resp = _request(
+                "POST",
+                OPENAI_API_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                body=body,
+            )
+
+            # Prefer output_text if present; else parse message content blocks.
+            if isinstance(resp, dict) and isinstance(resp.get("output_text"), str) and resp["output_text"].strip():
+                return resp["output_text"].strip()
+
+            parts = []
+            for item in resp.get("output", []) if isinstance(resp, dict) else []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") != "message":
+                    continue
+                for c in item.get("content", []) or []:
+                    if not isinstance(c, dict):
+                        continue
+                    if c.get("type") in ("output_text", "text"):
+                        txt = c.get("text") or ""
+                        if txt:
+                            parts.append(txt)
+            text = "\n".join(parts).strip()
+            if not text:
+                raise RuntimeError(f"OpenAI response missing text: keys={list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
+            return text
+
+        # Default: Anthropic
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY missing (required for AI_PROVIDER=anthropic)")
+
+        body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": p}],
+        }
+
+        resp = _request(
+            "POST",
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            body=body,
+        )
+
+        # Extract text from response
+        content = resp.get("content", [])
+        text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+        return "\n".join(text_parts).strip()
+
+    raw = _call_model(prompt)
+    # Post-check and rewrite loop (avoid link hallucinations + generic "AI slop").
+    for attempt in range(2):
+        parsed = _parse_ai_sections(raw)
+        draft = parsed.get("draft") or parsed.get("raw") or ""
+        issues = _lint_email_draft(draft, int(fu_number), days_since_call)
+        if not issues:
+            return raw
+
+        fix_prompt = (
+            prompt
+            + "\n\nCOMPLIANCE FIXES REQUIRED:\n"
+            + "\n".join(f"- {i}" for i in issues)
+            + "\n\nRewrite the email to fix the issues. Keep it short, specific, and human."
+        )
+        raw = _call_model(fix_prompt)
+
+    return raw
 
     if AI_PROVIDER == "openai":
         if not OPENAI_API_KEY:
@@ -1472,31 +1687,8 @@ PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
             raise RuntimeError(f"OpenAI response missing text: keys={list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
         return text
 
-    # Default: Anthropic
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY missing (required for AI_PROVIDER=anthropic)")
-
-    body = {
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 1024,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-
-    resp = _request(
-        "POST",
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
-        body=body,
-    )
-
-    # Extract text from response
-    content = resp.get("content", [])
-    text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
-    return "\n".join(text_parts)
+    # Unreachable (kept to reduce diff churn if you need to revert pieces).
+    return raw
 
 
 # ---------------------------------------------------------------------------
