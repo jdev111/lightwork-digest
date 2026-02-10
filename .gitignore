@@ -1,0 +1,9 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local output artifacts
+*_preview.html

@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lightwork Post-Call Digest - Build Plan</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 960px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; line-height: 1.7; background: #FFFCF0; }
+  h1 { font-size: 28px; border-bottom: 2px solid #2E5B88; padding-bottom: 10px; }
+  h2 { font-size: 22px; color: #2E5B88; margin-top: 36px; }
+  h3 { font-size: 18px; color: #444; }
+  table { border-collapse: collapse; width: 100%%; margin: 16px 0; font-size: 12px; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #2E5B88; color: white; white-space: nowrap; }
+  tr:nth-child(even) { background: #f9f7f0; }
+  code { background: #f0ede4; padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  pre { background: #f0ede4; padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+  pre code { background: none; padding: 0; }
+  strong { color: #1a1a1a; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 30px 0; }
+  ol, ul { padding-left: 24px; }
+  li { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<h1>Post-Call Follow-Up Digest: Build Plan</h1>
+<h2>What It Does</h2>
+<p>A Python script runs every morning at 8am. It sends you one email with:</p>
+<ul>
+<li>Every sales call from yesterday</li>
+<li>Lead context from Close.com (name, budget, health spend, home size, how they heard, why reaching out)</li>
+<li>Call summary from Granola transcript (what was discussed, concerns raised, objections)</li>
+<li>A personalized follow-up email draft for each call</li>
+<li>Suggested follow-up timing</li>
+</ul>
+<p>You read it, tweak if needed, copy/paste/send.</p>
+<hr />
+<h2>Data Sources</h2>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>What we pull</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Close.com API</td>
+<td>Yesterday's meetings tagged as "test call", "intro call", or "partner call" for ALL team members (Jay, Johnny, Dom). Lead details: name, budget, health spend, sq footage, referral source, why reaching out, heat level, meeting status</td>
+<td>REST API (key confirmed working)</td>
+</tr>
+<tr>
+<td>Granola via Zapier &gt; Google Sheet</td>
+<td>Meeting transcripts, notes, attendees, summary. Zapier triggers when meeting ends in Granola, saves row to a Google Sheet</td>
+<td>Google Sheets API (read-only)</td>
+</tr>
+<tr>
+<td>Claude API (Haiku for speed + cost)</td>
+<td>Generates call summary + personalized follow-up draft</td>
+<td>Anthropic API</td>
+</tr>
+<tr>
+<td>Gmail SMTP</td>
+<td>Sends the digest email to jay@lightworkhome.com</td>
+<td>smtplib with existing app password</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Script Flow</h2>
+<pre><code>8:00 AM daily (launchd)
+       |
+       v
+1. Pull yesterday's meetings from Close.com
+   - GET /activity/meeting/?date_created__gt={yesterday}
+   - Filter: title contains &quot;test call&quot;, &quot;intro call&quot;, or &quot;partner call&quot;
+   - Include ALL team members (Jay, Johnny, Dom)
+       |
+       v
+2. For each meeting, get lead details from Close.com
+   - GET /lead/{lead_id}/
+   - Extract: name, email, city, budget, health spend,
+     sq footage, referral, why reaching out, heat level
+       |
+       v
+3. Match meeting to Granola transcript
+   - Read from Google Sheet (populated by Zapier when meetings end)
+   - Match by: attendee email OR meeting title
+   - Extract: full transcript text + Granola AI summary
+       |
+       v
+4. For each call, send to Claude API:
+   - Lead context (from Close)
+   - Call transcript (from Granola)
+   - Prompt: &quot;Summarize this call and draft a follow-up email&quot;
+   - Returns: call summary + follow-up draft + suggested timing
+       |
+       v
+5. Build HTML email grouped by team member:
+   - JAY'S CALLS (Jay's section)
+   - JOHNNY'S CALLS (Johnny's section)
+   - DOM'S CALLS (Dom's section)
+       |
+       v
+6. Send to jay@lightworkhome.com via Gmail SMTP
+   Jay forwards relevant sections to Johnny/Dom
+</code></pre>
+<hr />
+<h2>What Claude Generates Per Call</h2>
+<p>For each call, Claude gets this context and produces:</p>
+<p><strong>Input:</strong>
+- Lead name, city, home size, budget, health spend
+- How they heard about Lightwork
+- Why they're reaching out (from form)
+- Full Granola transcript of the call</p>
+<p><strong>Output:</strong></p>
+<ol>
+<li><strong>Call Summary</strong> (3-4 bullet points): What was discussed, their main concerns, objections/hesitations, outcome</li>
+<li><strong>Follow-Up Email Draft</strong>: Personalized based on what was discussed. References specific things from the call. Written in Lightwork's voice (practical, grounded, not salesy).</li>
+<li><strong>Suggested Timing</strong>: When to send (today, 2 days, 1 week) based on how the call went</li>
+<li><strong>Priority</strong>: High/Medium/Low based on budget, urgency, engagement level</li>
+</ol>
+<hr />
+<h2>Files to Create</h2>
+<pre><code>lightwork-digest/
+  .env                          # API keys (already created)
+  post_call_digest.py           # Main script (~200 lines)
+  com.lightwork.digest.plist    # macOS launchd for daily 8am run
+  README.md                     # Setup instructions
+</code></pre>
+<hr />
+<h2>Tech Stack</h2>
+<ul>
+<li>Python 3 (already installed)</li>
+<li>No external packages needed: uses <code>urllib</code>, <code>json</code>, <code>smtplib</code>, <code>email</code> (all stdlib)</li>
+<li>Anthropic API called via raw HTTP (no pip install needed)</li>
+<li>Runs as macOS LaunchAgent (survives restarts, runs even if you're not logged in to terminal)</li>
+</ul>
+<hr />
+<h2>What the Digest Email Looks Like</h2>
+<pre><code>Subject: Lightwork Daily Digest - Feb 7, 2026 (5 calls)
+
+============================================================
+JAY'S CALLS (2)
+============================================================
+
+------------------------------------------------------------
+Kyle Alwyn (San Francisco)
+------------------------------------------------------------
+Budget: $2,000-5,000 | Health Spend: &lt;$2,000 | Home: &lt;1,500 sqft
+Source: Podcast | Status: Meeting Created
+
+CALL SUMMARY:
+- Discussed SF apartment assessment, interested in EMF + air quality
+- Asked about timeline and pricing for smaller units
+- Seemed ready to book but wanted to check with partner first
+
+FOLLOW-UP DRAFT:
+Hi Kyle, great speaking with you yesterday. To answer your question
+about timeline, we can typically schedule SF assessments within
+2 weeks. For a smaller apartment like yours, the process takes
+about 3-4 hours on-site. Happy to lock in a date whenever you
+and your partner are ready. Just reply here or book directly:
+[cal link]
+
+SEND: Tomorrow morning | PRIORITY: HIGH
+
+------------------------------------------------------------
+Ryan Carney (NYC)
+------------------------------------------------------------
+...
+
+============================================================
+JOHNNY'S CALLS (2)
+============================================================
+
+------------------------------------------------------------
+Taryn Blank (Sag Harbor, NY)
+------------------------------------------------------------
+...
+
+============================================================
+DOM'S CALLS (1)
+============================================================
+
+------------------------------------------------------------
+Matt Gleit (Menlo Park, CA)
+------------------------------------------------------------
+...
+</code></pre>
+<hr />
+<h2>Safety: This Will NEVER Email Leads</h2>
+<p>Four layers of protection:</p>
+<ol>
+<li><strong>Hardcoded recipient</strong>: The ONLY recipient is <code>jay@lightworkhome.com</code>. No variable, no config, no parameter accepts other emails.</li>
+<li><strong>Send guard</strong>: The send function checks the <code>to</code> address before sending. If it's not <code>jay@lightworkhome.com</code>, it throws an error and exits immediately.</li>
+<li><strong>Read-only on Close.com</strong>: The script only GETs data from Close. It never POSTs, PUTs, or sends through Close.</li>
+<li><strong>No lead email addresses in the <code>to</code> field</strong>: Lead emails only appear inside the digest body as text, never as recipients.</li>
+</ol>
+<h2>Limitations / Things to Note</h2>
+<ol>
+<li>
+<p><strong>Granola transcripts</strong>: Delivered via Zapier to Google Sheets. If Zapier hasn't synced a meeting yet, the digest will note "No transcript available" and generate the follow-up based on Close.com data only (still useful, just less personalized).</p>
+</li>
+<li>
+<p><strong>Meeting filtering</strong>: The script filters for "test call", "intro call", and "partner call" in the meeting title. Internal meetings, hiring calls, etc. are excluded.</p>
+</li>
+<li>
+<p><strong>Runs on your Mac</strong>: Requires your Mac to be on at 8am. If it's asleep, launchd will run it when it wakes up.</p>
+</li>
+</ol>
+<h2>One-Time Setup Required</h2>
+<ol>
+<li><strong>Zapier</strong>: Create the Granola &gt; Google Sheets zap (5 min)</li>
+<li>Trigger: Granola "Meeting note sent to Zapier"</li>
+<li>Action: Google Sheets "Create Spreadsheet Row"</li>
+<li>Map fields: title, date, attendees, transcript, summary</li>
+<li><strong>Google Sheets API</strong>: Create a service account key for read access (5 min)</li>
+<li><strong>Install launchd plist</strong>: One command to enable daily 8am runs</li>
+</ol>
+<hr />
+<h2>Lead Tracking Dashboard (Google Sheet)</h2>
+<p>A shared Google Sheet that auto-updates daily. The team opens it, sees who needs follow-up, and checks them off.</p>
+<h3>What the Sheet Looks Like</h3>
+<table>
+<thead>
+<tr>
+<th>Owner</th>
+<th>Lead Name</th>
+<th>City</th>
+<th>Budget</th>
+<th>Source</th>
+<th style="text-align: center;">FU 1</th>
+<th style="text-align: center;">FU 2</th>
+<th style="text-align: center;">FU 3</th>
+<th style="text-align: center;">FU 4</th>
+<th style="text-align: center;">FU 5</th>
+<th style="text-align: center;">FU 6</th>
+<th style="text-align: center;">FU 7</th>
+<th>Progress</th>
+<th>Last Activity</th>
+<th>Days Since</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Jay</td>
+<td>Kyle Alwyn</td>
+<td>SF</td>
+<td>$2-5k</td>
+<td>Podcast</td>
+<td style="text-align: center;">[x]</td>
+<td style="text-align: center;">[x]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td>2/7</td>
+<td>Email sent Feb 10</td>
+<td>1</td>
+</tr>
+<tr>
+<td>Jay</td>
+<td>Aaron O'Brien</td>
+<td>--</td>
+<td>$2-5k</td>
+<td>--</td>
+<td style="text-align: center;">[x]</td>
+<td style="text-align: center;">[x]</td>
+<td style="text-align: center;">[x]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td>3/7</td>
+<td>Email sent Feb 8</td>
+<td>3</td>
+</tr>
+<tr>
+<td>Johnny</td>
+<td>Taryn Blank</td>
+<td>Sag Harbor</td>
+<td>$2-5k</td>
+<td>Dr. Kachko</td>
+<td style="text-align: center;">[x]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td>1/7</td>
+<td>Call completed Feb 5</td>
+<td>6</td>
+</tr>
+<tr>
+<td>Dom</td>
+<td>Matt Gleit</td>
+<td>Menlo Park</td>
+<td>$2-5k</td>
+<td>Twitter</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td style="text-align: center;">[ ]</td>
+<td>0/7</td>
+<td>Call completed Feb 4</td>
+<td>7</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Goal: Hit 7 follow-ups per lead.</strong> Once all 7 are checked, the lead moves to a "Completed" tab.</p>
+<h3>7-Touch Value-Driven Follow-Up Cadence</h3>
+<p>Based on Jeremy Haynes' methodology: 80% pure value, 20% ask. Every email teaches something useful for their home. The value IS the follow-up. Every-other-day cadence in the early touches (converts 23% better than daily). Prospects who consume 5+ pieces of content convert at 3.4x the rate.</p>
+<table>
+<thead>
+<tr>
+<th>Touch</th>
+<th>Timing</th>
+<th>Type</th>
+<th>What</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FU 1</td>
+<td>Day 1</td>
+<td>Post-call value</td>
+<td>Personalized tip based on what they discussed on the call. Use the sales scripts: if they mentioned sleep, send the AC electrical field tip. If they mentioned a baby, send the baby monitor shield tip. Written INTO the email, not just a link.</td>
+<td>"You mentioned sleep was a concern, so here's one quick thing you can do tonight..."</td>
+</tr>
+<tr>
+<td>FU 2</td>
+<td>Day 3</td>
+<td>Second value drop</td>
+<td>Different topic-specific tip from the call, OR the example report with context on why it's relevant to their situation. Still 100% value, zero ask.</td>
+<td>"Also wanted to share our example report so you can see the kind of detail we go into. Given your interest in water quality, check out pages 30-35."</td>
+</tr>
+<tr>
+<td>FU 3</td>
+<td>Day 6</td>
+<td>Social proof + value</td>
+<td>Share a relevant testimonial or the Wilkinson case study, framed around their specific concern. Include one more actionable tip.</td>
+<td>"Andrew Wilkinson had similar concerns about his home. Here's what we found and what he did about it. Also, one more quick tip on air filtration..."</td>
+</tr>
+<tr>
+<td>FU 4</td>
+<td>Day 10</td>
+<td>Educational content</td>
+<td>Share the most relevant Lightwork newsletter article for their situation (EMF guide, mold testing guide, air quality guide). Write the key takeaway into the email body.</td>
+<td>"Thought you might find this interesting, we wrote a guide on how to test for mold the right way. The key insight is..."</td>
+</tr>
+<tr>
+<td>FU 5</td>
+<td>Day 16</td>
+<td>New angle + soft ask</td>
+<td>Share the science video or a different piece of content they haven't seen. First mention of "happy to continue the conversation whenever timing works."</td>
+<td>"In case helpful, this video explains the science behind what we do. If you'd like to pick up where we left off, I'm here."</td>
+</tr>
+<tr>
+<td>FU 6</td>
+<td>Day 25</td>
+<td>Availability + value</td>
+<td>Share one final relevant resource. Mention specific upcoming availability in their city. Light ask.</td>
+<td>"We have some availability in SF in early March. Also, thought you'd find this guide on air filtration useful for your apartment."</td>
+</tr>
+<tr>
+<td>FU 7</td>
+<td>Day 35</td>
+<td>Graceful close</td>
+<td>No pressure. "Totally understand if the timing isn't right. We're here whenever you're ready. In the meantime, here's one last resource." Keeps the door open.</td>
+<td>"No worries at all if now isn't the right time. We're here whenever makes sense. In the meantime, thought this guide might be useful."</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key rules (from Haynes):</strong>
+- Write the value INTO the email. Don't just drop a link and say "check this out."
+- Each email should be useful even if they never buy. That's what builds trust.
+- Personalize based on the call transcript: reference their specific concerns, home type, city, health goals
+- Never say "just checking in" or "just following up" without attaching value
+- The sales scripts (EMF tips, air purifier recs, grounding product warnings) are your value ammunition</p>
+<p>The daily digest email will tell you which leads are due for their next touch and draft the value-driven email for you, pulling from the transcript + sales scripts + relevant Lightwork content.</p>
+<h3>How It Works</h3>
+<ol>
+<li><strong>Auto-updates daily at 8am</strong> (same script that sends the digest email)</li>
+<li>Pulls all active leads from Close.com (not yet converted)</li>
+<li><strong>Preserves all checkboxes</strong> when updating. Script only updates data columns (last activity, days since), never overwrites the FU checkboxes.</li>
+<li><strong>Auto-detects follow-ups</strong>: If Close.com shows a new outgoing email to that lead since last update, it auto-checks the next unchecked FU box</li>
+<li><strong>Progress column</strong> auto-calculates (e.g., "3/7")</li>
+<li>Sorted by: fewest follow-ups first, then longest days since last activity</li>
+<li><strong>Conditional formatting</strong>:</li>
+<li>Row RED: 0/7 follow-ups and 3+ days since call</li>
+<li>Row YELLOW: Behind on cadence (next FU overdue)</li>
+<li>Row GREEN: On track or completed</li>
+<li>Progress bar in the Progress column</li>
+</ol>
+<h3>Columns</h3>
+<ul>
+<li><strong>Owner</strong>: Jay, Johnny, or Dom (from Close.com)</li>
+<li><strong>Lead Name</strong>: Full name, linked to Close.com lead page</li>
+<li><strong>City</strong>: Where they're based</li>
+<li><strong>Budget</strong>: From form ($2-5k, $5-10k, $10k+)</li>
+<li><strong>Source</strong>: How they heard about Lightwork</li>
+<li><strong>FU 1 through FU 7</strong>: Checkboxes for each follow-up touch (manual or auto-detected)</li>
+<li><strong>Progress</strong>: Auto-calculated count (e.g., "3/7")</li>
+<li><strong>Last Activity</strong>: Most recent email, call, or note in Close.com</li>
+<li><strong>Days Since</strong>: Days since last activity</li>
+</ul>
+<h3>Tabs</h3>
+<ul>
+<li><strong>Active</strong>: Leads with &lt; 7 follow-ups (main working view)</li>
+<li><strong>Completed</strong>: Leads with 7/7 follow-ups (archive)</li>
+<li><strong>Converted</strong>: Leads who booked an assessment (win!)</li>
+<li><strong>Closed</strong>: Leads who explicitly said no</li>
+</ul>
+<h3>Access</h3>
+<ul>
+<li>Jay, Johnny, and Dom all have edit access</li>
+<li>Anyone can check the "Followed Up" box</li>
+<li>Link pinned in Slack/bookmarked in browser</li>
+</ul>
+<hr />
+<h2>Next Steps After This</h2>
+<p>Once this is working, we can add:
+- Lead magnet downloaders who didn't book (from ConvertKit)
+- "Going cold" alerts for leads with no activity in X days
+- Automatic task creation in Close.com for each follow-up
+- Weekly summary of pipeline health</p>
+</body>
+</html>
