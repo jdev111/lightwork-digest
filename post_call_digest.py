@@ -70,7 +70,8 @@ CADENCE = {
     1: (1, "Post-call value",
         "Personalized tip from transcript. Reference specific things discussed on the call. "
         "If there's a relevant topic from the sales scripts (EMFs, air quality, mold, sleep, etc.), "
-        "include one actionable tip with product links. Keep it short and natural."),
+        "include one actionable tip with product links. Keep it short and natural. "
+        "Do not assume an on-site visit is booked; keep next steps optional unless the transcript explicitly confirms a date."),
     2: (3, "Second value drop",
         "Different topic from FU1 OR share the example report with context. "
         "100% value, zero ask. Do NOT repeat the same tip from FU1. "
@@ -1372,6 +1373,12 @@ CADENCE TYPE: {cadence_label}
 THIS IS FOLLOW-UP #{fu_number} ({fu_type})
 Day {day_offset} after the initial call.
 
+EMAIL STRUCTURE (default):
+1) 1 line referencing something specific from the call
+2) 1 useful resource or actionable tip (ONLY if it matches what they discussed)
+3) Soft, optional next step (questions, or confirm they want to move forward)
+4) Short sign-off (Jay, Co-founder | Lightwork Home Health)
+
 SPECIFIC INSTRUCTIONS FOR THIS FOLLOW-UP:
 {fu_instructions}
 
@@ -1410,6 +1417,7 @@ IMPORTANT RULES:
 - Never say "home health assessment" or "assessment." Just reference the service naturally.
 - When mentioning the example report, always hyperlink it: <a href="https://www.lightworkhome.com/examplereport">example report</a> (password: homehealth)
 - Only include a value-driven health tip if the transcript explicitly mentions a related topic (e.g., they talked about sleep, EMFs, air quality, mold, baby monitors, etc.). If there's no transcript or the transcript doesn't touch a topic from the sales scripts, do NOT force a tip. Just write a clean follow-up without one.
+- Do NOT imply anything is scheduled or confirmed (no "looking forward to our visit", no specific dates) unless the transcript explicitly confirms it. Use optional next-step language instead (e.g., "If you'd like, we can...").
 - Never use em dashes.
 - This is follow-up #{fu_number}. Do NOT repeat tips or resources from earlier follow-ups. Provide fresh value.
 
