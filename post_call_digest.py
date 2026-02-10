@@ -25,6 +25,12 @@ import json
 import os
 import ssl
 import time
+import base64
+import hashlib
+import secrets
+import threading
+import http.server
+import socket
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -146,6 +152,20 @@ GRANOLA_CACHE = os.environ.get(
     str(Path.home() / "Library/Application Support/Granola/cache-v3.json"),
 )
 
+# Granola MCP (OAuth + JSON-RPC over HTTP)
+GRANOLA_MCP_URL = os.environ.get("GRANOLA_MCP_URL", "https://mcp.granola.ai/mcp")
+GRANOLA_OAUTH_METADATA_URL = os.environ.get(
+    "GRANOLA_OAUTH_METADATA_URL",
+    "https://mcp.granola.ai/.well-known/oauth-authorization-server",
+)
+GRANOLA_MCP_TOKEN_PATH = Path(
+    os.environ.get(
+        "GRANOLA_MCP_TOKEN_PATH",
+        str(Path.home() / ".config/lightwork-digest/granola_mcp_token.json"),
+    )
+)
+GRANOLA_MCP_ENABLE = os.environ.get("GRANOLA_MCP_ENABLE", "").strip() == "1"
+
 # ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
 # ---------------------------------------------------------------------------
@@ -185,6 +205,305 @@ def _request(method, url, headers=None, body=None, basic_auth=None):
         error_body = e.read().decode() if e.fp else ""
         print(f"HTTP {e.code} for {url}: {error_body[:300]}")
         raise
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _load_json(path: Path):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+
+
+def _save_json(path: Path, data: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True))
+
+
+def _granola_oauth_metadata():
+    return _request("GET", GRANOLA_OAUTH_METADATA_URL)
+
+
+def _granola_dynamic_register(meta: dict, redirect_uri: str) -> dict:
+    """Dynamic client registration. Stores a public client (no secret)."""
+    reg_endpoint = meta.get("registration_endpoint")
+    if not reg_endpoint:
+        raise RuntimeError("Granola OAuth metadata missing registration_endpoint")
+    body = {
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "client_name": "lightwork-digest",
+    }
+    return _request("POST", reg_endpoint, body=body)
+
+
+def _granola_oauth_authorize_and_token(meta: dict) -> dict:
+    """Interactive OAuth login via localhost redirect, using PKCE."""
+    auth_endpoint = meta["authorization_endpoint"]
+    token_endpoint = meta["token_endpoint"]
+
+    # Bind an ephemeral localhost port.
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    redirect_uri = f"http://127.0.0.1:{port}/callback"
+
+    # Load or register client for this redirect_uri.
+    token_state = _load_json(GRANOLA_MCP_TOKEN_PATH) or {}
+    client = token_state.get("client") or {}
+    if client.get("redirect_uri") != redirect_uri or not client.get("client_id"):
+        reg = _granola_dynamic_register(meta, redirect_uri)
+        client = {
+            "client_id": reg.get("client_id"),
+            "redirect_uri": redirect_uri,
+        }
+        token_state["client"] = client
+        _save_json(GRANOLA_MCP_TOKEN_PATH, token_state)
+
+    client_id = client["client_id"]
+
+    # PKCE
+    code_verifier = _b64url(secrets.token_bytes(32))
+    code_challenge = _b64url(hashlib.sha256(code_verifier.encode()).digest())
+    state = _b64url(secrets.token_bytes(16))
+
+    scopes = "openid profile email offline_access"
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": scopes,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    url = auth_endpoint + "?" + urllib.parse.urlencode(params)
+
+    # Minimal localhost callback server. We must handle extra browser requests
+    # (e.g. /favicon.ico) without prematurely stopping.
+    result = {"code": None, "state": None, "error": None}
+    done = threading.Event()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            q = urllib.parse.parse_qs(parsed.query)
+            code = (q.get("code") or [None])[0]
+            st = (q.get("state") or [None])[0]
+            err = (q.get("error") or [None])[0]
+
+            if err:
+                result["error"] = err
+                done.set()
+            elif code and st:
+                result["code"] = code
+                result["state"] = st
+                done.set()
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            if done.is_set():
+                self.wfile.write(
+                    b"<html><body><h2>Granola connected.</h2><p>You can close this tab and return to the terminal.</p></body></html>"
+                )
+            else:
+                self.wfile.write(
+                    b"<html><body><p>Waiting for Granola authorization...</p></body></html>"
+                )
+
+        def log_message(self, fmt, *args):
+            return
+
+    httpd = http.server.HTTPServer(("127.0.0.1", port), Handler)
+
+    def serve():
+        httpd.serve_forever(poll_interval=0.2)
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+
+    print("\nGranola MCP login required.")
+    print("Opening browser for Granola authorization...")
+    import subprocess
+    subprocess.run(["open", url])
+
+    if not done.wait(timeout=180):
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
+        httpd.server_close()
+        raise RuntimeError("Granola OAuth timed out waiting for browser callback")
+
+    try:
+        httpd.shutdown()
+    except Exception:
+        pass
+    httpd.server_close()
+    t.join(timeout=5)
+
+    if result["error"]:
+        raise RuntimeError(f"Granola OAuth error: {result['error']}")
+    if result["state"] != state or not result["code"]:
+        raise RuntimeError("Granola OAuth callback missing code or state mismatch")
+
+    token_resp = _request(
+        "POST",
+        token_endpoint,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        body=urllib.parse.urlencode(
+            {
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "code": result["code"],
+                "redirect_uri": redirect_uri,
+                "code_verifier": code_verifier,
+            }
+        ).encode(),
+    )
+    # Persist tokens
+    now = int(time.time())
+    token_state["tokens"] = {
+        "access_token": token_resp.get("access_token"),
+        "refresh_token": token_resp.get("refresh_token"),
+        "expires_at": now + int(token_resp.get("expires_in") or 0),
+        "scope": token_resp.get("scope"),
+        "token_type": token_resp.get("token_type"),
+    }
+    _save_json(GRANOLA_MCP_TOKEN_PATH, token_state)
+    return token_state
+
+
+def _granola_refresh_token(meta: dict, token_state: dict) -> dict:
+    token_endpoint = meta["token_endpoint"]
+    client = token_state.get("client") or {}
+    tokens = token_state.get("tokens") or {}
+    refresh = tokens.get("refresh_token")
+    if not refresh:
+        raise RuntimeError("No Granola refresh_token available; re-auth required")
+    resp = _request(
+        "POST",
+        token_endpoint,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        body=urllib.parse.urlencode(
+            {
+                "grant_type": "refresh_token",
+                "client_id": client.get("client_id"),
+                "refresh_token": refresh,
+            }
+        ).encode(),
+    )
+    now = int(time.time())
+    tokens["access_token"] = resp.get("access_token")
+    if resp.get("refresh_token"):
+        tokens["refresh_token"] = resp.get("refresh_token")
+    tokens["expires_at"] = now + int(resp.get("expires_in") or 0)
+    token_state["tokens"] = tokens
+    _save_json(GRANOLA_MCP_TOKEN_PATH, token_state)
+    return token_state
+
+
+class GranolaMCPClient:
+    def __init__(self, enable_interactive_login: bool = True):
+        self.enable_interactive_login = enable_interactive_login
+        self.meta = _granola_oauth_metadata()
+        self.session_id = None
+        self.token_state = _load_json(GRANOLA_MCP_TOKEN_PATH) or {}
+
+    def _access_token(self) -> str:
+        tokens = (self.token_state or {}).get("tokens") or {}
+        tok = tokens.get("access_token")
+        exp = tokens.get("expires_at") or 0
+        if tok and exp and exp - int(time.time()) > 30:
+            return tok
+        # Refresh if possible
+        if tokens.get("refresh_token"):
+            self.token_state = _granola_refresh_token(self.meta, self.token_state)
+            return (self.token_state.get("tokens") or {}).get("access_token")
+        if not self.enable_interactive_login:
+            raise RuntimeError("Granola MCP not authenticated. Set GRANOLA_MCP_ENABLE=1 and run again to login.")
+        self.token_state = _granola_oauth_authorize_and_token(self.meta)
+        return (self.token_state.get("tokens") or {}).get("access_token")
+
+    def _post(self, payload: dict) -> dict:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._access_token()}",
+            "MCP-Protocol-Version": "2024-11-05",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self.session_id:
+            headers["MCP-Session-Id"] = self.session_id
+        req = urllib.request.Request(
+            GRANOLA_MCP_URL,
+            data=json.dumps(payload).encode(),
+            headers=headers,
+            method="POST",
+        )
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+            # Granola uses MCP-Session-Id header for streamable HTTP sessions.
+            sid = resp.headers.get("MCP-Session-Id")
+            if sid:
+                self.session_id = sid
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            body = resp.read().decode("utf-8", errors="replace")
+            if "text/event-stream" in ct:
+                # Streamable HTTP transport. Granola returns SSE frames like:
+                # event: message\n data: {...}\n\n
+                last = None
+                for line in body.splitlines():
+                    line = line.strip()
+                    if line.startswith("data:"):
+                        data = line[len("data:"):].strip()
+                        if data:
+                            last = json.loads(data)
+                if last is None:
+                    raise RuntimeError(f"MCP SSE response had no data frames: {body[:200]}")
+                return last
+            return json.loads(body)
+
+    def initialize(self):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "clientInfo": {"name": "lightwork-digest", "version": "0.1"},
+                "capabilities": {},
+            },
+        }
+        resp = self._post(payload)
+        if "error" in resp:
+            raise RuntimeError(f"MCP initialize error: {resp['error']}")
+        return resp.get("result")
+
+    def tools_list(self):
+        payload = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        resp = self._post(payload)
+        if "error" in resp:
+            raise RuntimeError(f"MCP tools/list error: {resp['error']}")
+        return resp.get("result", {}).get("tools", [])
+
+    def tools_call(self, name: str, arguments: dict):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }
+        resp = self._post(payload)
+        if "error" in resp:
+            raise RuntimeError(f"MCP tools/call error: {resp['error']}")
+        return resp.get("result")
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +786,7 @@ def get_leads_due_today(customer_leads):
         lead_name = lead_info.get("display_name", "Unknown")
         cadence_type = info.get("cadence_type", "active")
         transcript_label = info.get("transcript_label", "No")
+        mcp_meeting_id = info.get("mcp_meeting_id")
 
         # Pick the right cadence
         cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
@@ -499,6 +819,7 @@ def get_leads_due_today(customer_leads):
             "cadence_type": cadence_type,
             "max_touches": max_touches,
             "transcript_label": transcript_label,
+            "mcp_meeting_id": mcp_meeting_id,
         })
 
         if next_fu > max_touches:
@@ -518,6 +839,7 @@ def get_leads_due_today(customer_leads):
                 "meetings": info["meetings"],
                 "owner_name": info["owner_name"],
                 "cadence_type": cadence_type,
+                "mcp_meeting_id": mcp_meeting_id,
             })
             status = "DUE TODAY" if days_overdue == 0 else f"OVERDUE by {days_overdue}d"
             tag = " [NURTURE]" if cadence_type == "nurture" else ""
@@ -823,6 +1145,100 @@ def get_transcript_label(source, match_obj, granola_transcripts):
             return "No (not recorded)"
         return "No"
     return "No"
+
+
+def _mcp_text_content(result: dict) -> str:
+    """Extract the first text block payload from an MCP tool result."""
+    if not isinstance(result, dict):
+        return ""
+    content = result.get("content")
+    if not isinstance(content, list):
+        return ""
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            return block.get("text") or ""
+    return ""
+
+
+def mcp_list_meetings(client: "GranolaMCPClient", since_dt: datetime, until_dt: datetime):
+    """Return a list of meetings with {id,title,date_str,emails:set}."""
+    start = since_dt.date().isoformat()
+    end = until_dt.date().isoformat()
+    res = client.tools_call("list_meetings", {"time_range": "custom", "custom_start": start, "custom_end": end})
+    text = _mcp_text_content(res)
+    meetings = []
+    if not text:
+        return meetings
+    import re
+    # Split into <meeting ...> ... </meeting> blocks so we can extract participants.
+    for m in re.finditer(r'<meeting id="([^"]+)" title="([^"]*)" date="([^"]*)">(.*?)</meeting>', text, flags=re.DOTALL):
+        mid, title, date_str, inner = m.group(1), m.group(2), m.group(3), m.group(4)
+        emails = set(e.lower() for e in re.findall(r"<([^>\\s]+@[^>\\s]+)>", inner))
+        meetings.append({"id": mid, "title": title, "date_str": date_str, "emails": emails})
+    return meetings
+
+
+def mcp_match_meeting(close_meeting: dict, mcp_meetings: list) -> dict | None:
+    """Match a Close meeting to a Granola MCP meeting list."""
+    close_attendees = set()
+    for a in close_meeting.get("attendees", []):
+        email = (a.get("email") or "").lower()
+        if email and email not in TEAM_EMAILS:
+            close_attendees.add(email)
+
+    meeting_title = (close_meeting.get("title") or "").lower().strip()
+    # Compare on date only with +/-1 day tolerance (timezone differences).
+    starts_at = close_meeting.get("starts_at", "")
+    close_date = None
+    if starts_at:
+        try:
+            close_date = datetime.fromisoformat(starts_at.replace("Z", "+00:00")).date()
+        except (ValueError, TypeError):
+            close_date = None
+
+    best = None
+    best_score = 0
+    for gm in mcp_meetings:
+        score = 0
+        overlap = close_attendees & (gm.get("emails") or set())
+        if overlap:
+            score += 10 * len(overlap)
+
+        gtitle = (gm.get("title") or "").lower().strip()
+        if meeting_title and gtitle:
+            if meeting_title == gtitle:
+                score += 8
+            elif meeting_title in gtitle or gtitle in meeting_title:
+                score += 5
+
+        if close_date and gm.get("date_str"):
+            try:
+                gdt = datetime.strptime(gm["date_str"], "%b %d, %Y %I:%M %p").date()
+                if abs((gdt - close_date).days) <= 1:
+                    score += 2
+            except Exception:
+                pass
+
+        if score > best_score:
+            best_score = score
+            best = gm
+
+    if best_score >= 5:
+        return best
+    return None
+
+
+def mcp_get_transcript_text(client: "GranolaMCPClient", meeting_id: str) -> str:
+    res = client.tools_call("get_meeting_transcript", {"meeting_id": meeting_id})
+    text = _mcp_text_content(res).strip()
+    if not text:
+        return ""
+    # Tool returns a JSON object as text.
+    try:
+        obj = json.loads(text)
+        return (obj.get("transcript") or "").strip()
+    except Exception:
+        return ""
 
 
 def _extract_text_from_prosemirror(node):
@@ -1274,7 +1690,24 @@ def main():
         return
 
     # 2. Load Granola transcripts early so the tracker can show transcript status.
-    print("\nLoading Granola transcripts...")
+    # Prefer Granola MCP (authoritative transcripts), then fall back to Sheet/local cache.
+    mcp_client = None
+    mcp_meetings = []
+    mcp_transcripts = {}  # meeting_id -> transcript_text
+
+    if GRANOLA_MCP_ENABLE:
+        try:
+            print("\nConnecting to Granola MCP...")
+            mcp_client = GranolaMCPClient(enable_interactive_login=True)
+            mcp_client.initialize()
+            since = now - timedelta(days=CADENCE_LOOKBACK_DAYS)
+            mcp_meetings = mcp_list_meetings(mcp_client, since, now)
+            print(f"  {len(mcp_meetings)} meetings from MCP (last {CADENCE_LOOKBACK_DAYS} days)")
+        except Exception as e:
+            print(f"  Warning: Granola MCP unavailable: {e}")
+            mcp_client = None
+
+    print("\nLoading Granola transcripts (fallback sources)...")
     sheet_rows = load_granola_sheet()
     print(f"  {len(sheet_rows)} rows from Google Sheet")
 
@@ -1283,10 +1716,26 @@ def main():
 
     # Annotate each lead with transcript status for tracker view
     for lead_id, info in customer_leads.items():
-        earliest_meeting = min(
-            info["meetings"],
-            key=lambda m: m.get("starts_at", ""),
-        )
+        earliest_meeting = min(info["meetings"], key=lambda m: m.get("starts_at", ""))
+
+        # MCP first
+        if mcp_client and mcp_meetings:
+            m = mcp_match_meeting(earliest_meeting, mcp_meetings)
+            if m:
+                mid = m["id"]
+                info["mcp_meeting_id"] = mid
+                if mid not in mcp_transcripts:
+                    try:
+                        mcp_transcripts[mid] = mcp_get_transcript_text(mcp_client, mid)
+                    except Exception:
+                        mcp_transcripts[mid] = ""
+                if mcp_transcripts[mid]:
+                    info["transcript_label"] = "Yes (MCP)"
+                    continue
+                info["transcript_label"] = "No (MCP)"
+                continue
+
+        # Fallback: Sheet/local cache
         src, match_obj = get_granola_match(earliest_meeting, sheet_rows, granola_docs)
         info["transcript_label"] = get_transcript_label(src, match_obj, granola_transcripts)
 
@@ -1343,9 +1792,25 @@ def main():
             key=lambda m: m.get("starts_at", ""),
         )
 
-        # Match to Granola: try Google Sheet first, then local cache
+        # Match to Granola: MCP first, then Google Sheet, then local cache
         call_notes = ""
         transcript_present = False
+
+        # MCP transcript
+        if mcp_client:
+            mid = entry.get("mcp_meeting_id")
+            if mid:
+                transcript = mcp_transcripts.get(mid)
+                if transcript is None:
+                    try:
+                        transcript = mcp_get_transcript_text(mcp_client, mid)
+                    except Exception:
+                        transcript = ""
+                    mcp_transcripts[mid] = transcript
+                if transcript:
+                    transcript_present = True
+                    call_notes = "CALL TRANSCRIPT:\n" + transcript[:6000]
+                    print("  Transcript: Granola MCP")
 
         if sheet_rows:
             sheet_match = match_granola_sheet(earliest_meeting, sheet_rows)
