@@ -1262,6 +1262,35 @@ def _extract_text_from_prosemirror(node):
     return "\n".join(t for t in texts if t)
 
 
+def _parse_ai_sections(text: str) -> dict:
+    """Parse model output into draft/reasoning/priority sections if present."""
+    import re
+    out = {"draft": "", "reasoning": "", "priority": "", "raw": text or ""}
+    s = (text or "").strip()
+    if not s:
+        return out
+
+    # Normalize headings to make parsing a bit more resilient.
+    # We keep original content, just locate markers.
+    def grab_between(start_pat, end_pat):
+        m = re.search(start_pat + r"\s*(.*?)\s*(?:" + end_pat + r"|$)", s, flags=re.DOTALL | re.IGNORECASE)
+        return m.group(1).strip() if m else ""
+
+    draft = grab_between(r"FOLLOW-UP\s*DRAFT:", r"VALUE\s*TIP\s*REASONING:")
+    reasoning = grab_between(r"VALUE\s*TIP\s*REASONING:", r"PRIORITY:")
+    prio = grab_between(r"PRIORITY:", r"$")
+
+    # Fallback: if headings not present, treat whole thing as draft.
+    if not draft and not reasoning and not prio:
+        out["draft"] = s
+        return out
+
+    out["draft"] = draft
+    out["reasoning"] = reasoning
+    out["priority"] = prio.splitlines()[0].strip() if prio else ""
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Claude API
 # ---------------------------------------------------------------------------
@@ -1671,6 +1700,33 @@ def build_lead_section(lead_info, claude_output, granola_found,
     accent_color = "#8e44ad" if cadence_type == "nurture" else "#2E5B88"
     border_color = "#8e44ad" if cadence_type == "nurture" else "#ddd"
 
+    parsed = _parse_ai_sections(claude_output)
+    draft_html = parsed["draft"] or parsed["raw"]
+    reasoning = (parsed["reasoning"] or "").strip()
+    priority = (parsed["priority"] or "").strip()
+
+    reasoning_box = ""
+    if reasoning:
+        reasoning_box = f"""
+        <div style="border:1px solid #eee; border-radius:8px; padding:10px 12px; background:#fbfbfb; margin-bottom:10px;">
+          <div style="font-size:11px; letter-spacing:0.02em; text-transform:uppercase; color:#888; font-weight:700; margin-bottom:6px;">
+            Why This Tip/Resource
+          </div>
+          <div style="font-size:13px; color:#333; line-height:1.5; white-space:pre-wrap;">{html_mod.escape(reasoning)}</div>
+        </div>
+        """
+
+    priority_box = ""
+    if priority:
+        priority_box = f"""
+        <div style="border:1px solid #eee; border-radius:8px; padding:10px 12px; background:#fbfbfb;">
+          <div style="font-size:11px; letter-spacing:0.02em; text-transform:uppercase; color:#888; font-weight:700; margin-bottom:6px;">
+            Priority
+          </div>
+          <div style="font-size:13px; color:#333; font-weight:700;">{html_mod.escape(priority)}</div>
+        </div>
+        """
+
     return f"""
     <div style="border:1px solid {border_color}; border-radius:8px; padding:16px; margin-bottom:20px; background:#fff;">
       <h3 style="margin:0 0 4px 0; color:#1a1a1a;">
@@ -1688,8 +1744,18 @@ def build_lead_section(lead_info, claude_output, granola_found,
         Budget: {budget} | Health Spend: {health_spend} | Home: {sq_footage}<br>
         Source: {source} | Status: {meeting_status}
       </div>
-      <div style="white-space:pre-wrap; font-size:14px; line-height:1.6; color:#1a1a1a;">{claude_output}</div>
-      {prev_emails_html}
+      <table style="width:100%; border-collapse:separate; border-spacing:0; margin-top:10px;">
+        <tr>
+          <td style="vertical-align:top; padding-right:14px; width:68%;">
+            <div style="white-space:pre-wrap; font-size:14px; line-height:1.6; color:#1a1a1a;">{draft_html}</div>
+            {prev_emails_html}
+          </td>
+          <td style="vertical-align:top; width:32%;">
+            {reasoning_box}
+            {priority_box}
+          </td>
+        </tr>
+      </table>
     </div>"""
 
 
