@@ -238,9 +238,14 @@ def get_meetings_in_range(since_date, until_date=None):
         has_more = data.get("has_more", False)
         skip += len(meetings)
 
-    # Filter to meetings that actually started within the range
+    # Filter to meetings that actually started within the range AND were completed.
+    # Close returns other statuses here (e.g. canceled, declined-by-lead). Those
+    # should never enter the follow-up cadence.
     completed = []
     for m in all_meetings:
+        status = (m.get("status") or "").lower()
+        if status != "completed":
+            continue
         starts_at = m.get("starts_at", "")
         if not starts_at:
             continue
@@ -356,7 +361,8 @@ WON_OPP_STATUSES = {
 
 def _get_lead_opp_status(lead_id):
     """Check lead's opportunity status. Returns one of: 'won', 'nurture', 'active'."""
-    data = close_get("/opportunity/", {"lead_id": lead_id, "_limit": 10})
+    # Use a higher limit so we don't miss an older "won" stage due to pagination.
+    data = close_get("/opportunity/", {"lead_id": lead_id, "_limit": 100})
     for opp in data.get("data", []):
         status = (opp.get("status_label") or "").lower()
         if status in WON_OPP_STATUSES:
