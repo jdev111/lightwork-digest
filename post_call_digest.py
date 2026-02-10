@@ -146,6 +146,7 @@ load_env(ENV_PATH)
 
 CLOSE_API_KEY = os.environ.get("CLOSE_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 SKIP_CLAUDE = os.environ.get("SKIP_CLAUDE", "").strip() == "1"
 GRANOLA_CACHE = os.environ.get(
     "GRANOLA_CACHE",
@@ -165,6 +166,14 @@ GRANOLA_MCP_TOKEN_PATH = Path(
     )
 )
 GRANOLA_MCP_ENABLE = os.environ.get("GRANOLA_MCP_ENABLE", "").strip() == "1"
+
+# AI provider
+# - anthropic: existing behavior (default)
+# - openai: use OpenAI Responses API (e.g. gpt-5-codex)
+AI_PROVIDER = (os.environ.get("AI_PROVIDER", "anthropic") or "anthropic").strip().lower()
+OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/responses")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-codex")
+OPENAI_REASONING_EFFORT = (os.environ.get("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
 
 # ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
@@ -1384,6 +1393,51 @@ VALUE TIP REASONING:
 [If you included a health tip or resource, explain in 1 sentence why it's relevant to this lead. If none, write "No transcript match for a specific tip."]
 
 PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
+
+    if AI_PROVIDER == "openai":
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY missing (required for AI_PROVIDER=openai)")
+
+        body = {
+            "model": OPENAI_MODEL,
+            "input": prompt,
+            "reasoning": {"effort": OPENAI_REASONING_EFFORT},
+        }
+        resp = _request(
+            "POST",
+            OPENAI_API_URL,
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            body=body,
+        )
+
+        # Prefer output_text if present; else parse message content blocks.
+        if isinstance(resp, dict) and isinstance(resp.get("output_text"), str) and resp["output_text"].strip():
+            return resp["output_text"].strip()
+
+        parts = []
+        for item in resp.get("output", []) if isinstance(resp, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "message":
+                continue
+            for c in item.get("content", []) or []:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") in ("output_text", "text"):
+                    txt = c.get("text") or ""
+                    if txt:
+                        parts.append(txt)
+        text = "\n".join(parts).strip()
+        if not text:
+            raise RuntimeError(f"OpenAI response missing text: keys={list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
+        return text
+
+    # Default: Anthropic
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY missing (required for AI_PROVIDER=anthropic)")
 
     body = {
         "model": "claude-haiku-4-5-20251001",
