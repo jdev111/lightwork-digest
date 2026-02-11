@@ -20,10 +20,13 @@ No external packages required - stdlib only.
 """
 
 import csv
+import html as html_mod
 import io
 import json
 import os
+import re
 import ssl
+import subprocess
 import time
 import base64
 import hashlib
@@ -140,6 +143,21 @@ CADENCE_LOOKBACK_DAYS = 45
 # Max leads per digest (prevents backlog flood on first run)
 MAX_LEADS_PER_DIGEST = 8
 
+# Meeting matching
+MATCH_THRESHOLD = 5  # minimum score to consider a transcript match valid
+
+# Transcript/prompt size caps
+TRANSCRIPT_CAP_SHEET = 6000
+TRANSCRIPT_CAP_LOCAL = 4000
+SALES_SCRIPTS_CAP = 3000
+FOLLOWUP_EXAMPLES_CAP = 2000
+SENT_EMAIL_BODY_CAP = 500
+
+# Network
+HTTP_TIMEOUT_SECONDS = 30
+RETRY_BACKOFF_FACTOR = 0.8
+OAUTH_TIMEOUT_SECONDS = 180
+
 
 
 def load_env(path):
@@ -202,7 +220,6 @@ DEFAULT_ALLOWED_URL_PREFIXES = [
 
 
 def _extract_urls_for_allowlist(text: str) -> list:
-    import re
     if not text:
         return []
     urls = re.findall(r"https?://[^\s<>()\"']+", text)
@@ -299,7 +316,6 @@ def _request(method, url, headers=None, body=None, basic_auth=None):
 
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     if basic_auth:
-        import base64
         cred = base64.b64encode(f"{basic_auth[0]}:{basic_auth[1]}".encode()).decode()
         req.add_header("Authorization", f"Basic {cred}")
 
@@ -308,25 +324,24 @@ def _request(method, url, headers=None, body=None, basic_auth=None):
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+            with urllib.request.urlopen(req, context=ctx, timeout=HTTP_TIMEOUT_SECONDS) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             error_body = e.read().decode() if e.fp else ""
             retryable = e.code in transient_codes
             if retryable and attempt < max_attempts:
-                time.sleep(0.8 * attempt)
+                time.sleep(RETRY_BACKOFF_FACTOR * attempt)
                 continue
             print(f"HTTP {e.code} for {url}: {error_body[:300]}")
             raise
         except (urllib.error.URLError, TimeoutError, ConnectionResetError, ssl.SSLError):
             if attempt < max_attempts:
-                time.sleep(0.8 * attempt)
+                time.sleep(RETRY_BACKOFF_FACTOR * attempt)
                 continue
             raise
 
 
 def _extract_urls(text: str) -> list:
-    import re
     if not text:
         return []
     urls = re.findall(r"https?://[^\s<>()\"']+", text)
@@ -344,7 +359,6 @@ def _extract_urls(text: str) -> list:
 
 
 def _sentence_count(text: str) -> int:
-    import re
     s = (text or "").strip()
     if not s:
         return 0
@@ -354,7 +368,6 @@ def _sentence_count(text: str) -> int:
 
 
 def _word_count(text: str) -> int:
-    import re
     return len(re.findall(r"\b\w+\b", text or ""))
 
 
@@ -399,6 +412,10 @@ def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None) -
     if d.count("!") > MAX_EXCLAMATIONS:
         issues.append(f"Too many exclamation points (> {MAX_EXCLAMATIONS})")
 
+    # Em dashes (U+2014) are forbidden per style guide
+    if "\u2014" in d:
+        issues.append("Contains em dash(es). Replace with commas, periods, or semicolons.")
+
     return issues
 
 
@@ -416,6 +433,11 @@ def _load_json(path: Path):
 def _save_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    # Restrict token files to owner-only access
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _granola_oauth_metadata():
@@ -526,10 +548,9 @@ def _granola_oauth_authorize_and_token(meta: dict) -> dict:
 
     print("\nGranola MCP login required.")
     print("Opening browser for Granola authorization...")
-    import subprocess
     subprocess.run(["open", url])
 
-    if not done.wait(timeout=180):
+    if not done.wait(timeout=OAUTH_TIMEOUT_SECONDS):
         try:
             httpd.shutdown()
         except Exception:
@@ -643,7 +664,7 @@ class GranolaMCPClient:
             method="POST",
         )
         ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+        with urllib.request.urlopen(req, context=ctx, timeout=HTTP_TIMEOUT_SECONDS) as resp:
             # Granola uses MCP-Session-Id header for streamable HTTP sessions.
             sid = resp.headers.get("MCP-Session-Id")
             if sid:
@@ -720,14 +741,12 @@ def close_get(endpoint, params=None):
     return _request("GET", url, basic_auth=(CLOSE_API_KEY, ""))
 
 
-def get_meetings_in_range(since_date, until_date=None):
-    """Pull completed meetings from Close.com within a date range.
+def _fetch_all_meetings(since_date, until_date=None):
+    """Fetch ALL meetings from Close.com within a date range (any status).
 
-    Args:
-        since_date: datetime, start of range (inclusive)
-        until_date: datetime, end of range (exclusive). Defaults to now.
-
-    Returns list of meeting dicts whose starts_at falls in [since_date, until_date).
+    This is the single source of meeting data. Other functions filter
+    the result by status (completed, no-show, etc.) to avoid duplicate
+    API calls.
     """
     now = datetime.now(timezone.utc)
     if until_date is None:
@@ -753,14 +772,24 @@ def get_meetings_in_range(since_date, until_date=None):
         has_more = data.get("has_more", False)
         skip += len(meetings)
 
-    # Filter to meetings that actually started within the range AND were completed.
-    # Close returns other statuses here (e.g. canceled, declined-by-lead). Those
-    # should never enter the follow-up cadence.
-    completed = []
+    return all_meetings
+
+
+def _filter_meetings_in_range(all_meetings, since_date, until_date, statuses=None):
+    """Filter meetings by date range and optional status set.
+
+    Args:
+        all_meetings: raw meeting list from _fetch_all_meetings()
+        since_date: datetime, start of range (inclusive)
+        until_date: datetime, end of range (exclusive)
+        statuses: set of lowercase status strings to include, or None for all
+    """
+    result = []
     for m in all_meetings:
-        status = (m.get("status") or "").lower()
-        if status != "completed":
-            continue
+        if statuses is not None:
+            status = (m.get("status") or "").lower().strip()
+            if status not in statuses:
+                continue
         starts_at = m.get("starts_at", "")
         if not starts_at:
             continue
@@ -769,13 +798,32 @@ def get_meetings_in_range(since_date, until_date=None):
         except (ValueError, TypeError):
             continue
         if since_date <= start_dt < until_date:
-            completed.append(m)
+            result.append(m)
+    return result
 
-    return completed
+
+def get_meetings_in_range(since_date, until_date=None, all_meetings=None):
+    """Pull completed meetings from Close.com within a date range.
+
+    Args:
+        since_date: datetime, start of range (inclusive)
+        until_date: datetime, end of range (exclusive). Defaults to now.
+        all_meetings: pre-fetched meeting list (skips API call if provided)
+
+    Returns list of completed meeting dicts in [since_date, until_date).
+    """
+    if until_date is None:
+        until_date = datetime.now(timezone.utc)
+    if all_meetings is None:
+        all_meetings = _fetch_all_meetings(since_date, until_date)
+    return _filter_meetings_in_range(all_meetings, since_date, until_date, {"completed"})
 
 
-def get_recent_customer_leads():
+def get_recent_customer_leads(all_meetings=None):
     """Get Customer Leads who had calls in the last CADENCE_LOOKBACK_DAYS days.
+
+    Args:
+        all_meetings: pre-fetched meeting list (skips API call if provided)
 
     Returns:
         dict: {lead_id: {"lead_info": dict, "first_call_date": datetime,
@@ -785,7 +833,7 @@ def get_recent_customer_leads():
     since = now - timedelta(days=CADENCE_LOOKBACK_DAYS)
 
     print(f"Fetching meetings from last {CADENCE_LOOKBACK_DAYS} days...")
-    meetings = get_meetings_in_range(since)
+    meetings = get_meetings_in_range(since, all_meetings=all_meetings)
     print(f"  Found {len(meetings)} completed meetings")
 
     # Group by lead_id, track earliest meeting
@@ -851,51 +899,24 @@ def get_recent_customer_leads():
     return result
 
 
-def get_no_show_lead_ids(since_date, until_date=None):
-    """Return lead_ids with at least one no-show style meeting in range."""
-    now = datetime.now(timezone.utc)
+NO_SHOW_STATUSES = {"canceled", "declined-by-lead", "no-show", "noshow"}
+
+
+def get_no_show_lead_ids(since_date, until_date=None, all_meetings=None):
+    """Return lead_ids with at least one no-show style meeting in range.
+
+    Args:
+        all_meetings: pre-fetched meeting list (skips API call if provided)
+    """
     if until_date is None:
-        until_date = now
+        until_date = datetime.now(timezone.utc)
+    if all_meetings is None:
+        all_meetings = _fetch_all_meetings(since_date, until_date)
 
-    no_show_statuses = {"canceled", "declined-by-lead", "no-show", "noshow"}
-    all_meetings = []
-    has_more = True
-    skip = 0
-
-    while has_more:
-        data = close_get(
-            "/activity/meeting/",
-            {
-                "date_created__gte": (since_date - timedelta(days=7)).strftime(
-                    "%Y-%m-%dT%H:%M:%S+00:00"
-                ),
-                "_limit": 100,
-                "_skip": skip,
-            },
-        )
-        meetings = data.get("data", [])
-        all_meetings.extend(meetings)
-        has_more = data.get("has_more", False)
-        skip += len(meetings)
-
-    no_show_leads = set()
-    for m in all_meetings:
-        lead_id = m.get("lead_id", "")
-        if not lead_id:
-            continue
-        status = (m.get("status") or "").lower().strip()
-        if status not in no_show_statuses:
-            continue
-        starts_at = m.get("starts_at", "")
-        if not starts_at:
-            continue
-        try:
-            start_dt = datetime.fromisoformat(starts_at.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            continue
-        if since_date <= start_dt < until_date:
-            no_show_leads.add(lead_id)
-    return no_show_leads
+    no_show_meetings = _filter_meetings_in_range(
+        all_meetings, since_date, until_date, NO_SHOW_STATUSES
+    )
+    return {m.get("lead_id", "") for m in no_show_meetings if m.get("lead_id")}
 
 
 def get_lead_details(lead_id):
@@ -964,8 +985,9 @@ def get_followup_history(lead_id, first_call_date):
     has_more = True
     skip = 0
 
-    # Fetch follow-up emails after first call date, group by thread
-    # threads dict: normalized_subject -> {subject, body} (keeps latest email)
+    # Fetch follow-up emails after first call date, group by thread.
+    # threads dict: normalized_subject -> {subject, body, date}
+    # Keeps the latest email per thread (most relevant context for Claude).
     threads = {}
     while has_more:
         data = close_get(
@@ -983,13 +1005,15 @@ def get_followup_history(lead_id, first_call_date):
                 subject = (e.get("subject") or "(no subject)").strip()
                 if "assessment" in subject.lower():
                     continue
-                # Normalize subject to group thread replies together
                 norm = _normalize_subject(subject)
-                if norm not in threads:
+                email_date = e.get("date_created", "")
+                # Keep the latest email per thread (overwrite if newer)
+                existing = threads.get(norm)
+                if existing is None or email_date > existing.get("date", ""):
                     body = (e.get("body_text") or e.get("body_text_quoted") or "").strip()
-                    if len(body) > 500:
-                        body = body[:500] + "..."
-                    threads[norm] = {"subject": subject, "body": body}
+                    if len(body) > SENT_EMAIL_BODY_CAP:
+                        body = body[:SENT_EMAIL_BODY_CAP] + "..."
+                    threads[norm] = {"subject": subject, "body": body, "date": email_date}
         has_more = data.get("has_more", False)
         skip += len(emails)
 
@@ -999,7 +1023,6 @@ def get_followup_history(lead_id, first_call_date):
 
 def _normalize_subject(subject):
     """Strip Re:/Fwd:/[INT] prefixes to get the root thread subject."""
-    import re
     s = subject.strip()
     # Repeatedly strip leading Re:, Fwd:, RE:, FW:, [INT], .Re: etc.
     while True:
@@ -1093,8 +1116,8 @@ def get_leads_due_today(customer_leads):
             tag = " [NURTURE]" if cadence_type == "nurture" else ""
             print(f"  {lead_name}: {label} {next_fu}/{max_touches} due in {-days_overdue}d{tag}")
 
-    # Sort: due today first, then least overdue (warmest leads first)
-    due_leads.sort(key=lambda x: x["days_overdue"])
+    # Sort: most overdue first so the cap doesn't drop urgent leads
+    due_leads.sort(key=lambda x: x["days_overdue"], reverse=True)
     return due_leads, all_leads_status
 
 
@@ -1124,50 +1147,80 @@ def load_granola_sheet():
     return rows
 
 
-def match_granola_sheet(meeting, sheet_rows):
-    """Match a Close.com meeting to a Granola Sheet row.
-
-    Match by attendee email overlap or title match.
-    Returns the row dict if matched, None otherwise.
-    """
-    # Non-team attendee emails from Close meeting
+def _get_close_meeting_context(meeting):
+    """Extract non-team attendee emails, title, and date from a Close meeting."""
     close_attendees = set()
     for a in meeting.get("attendees", []):
         email = (a.get("email") or "").lower()
         if email and email not in TEAM_EMAILS:
             close_attendees.add(email)
+    title = (meeting.get("title") or "").lower().strip()
+    date_str = (meeting.get("date_created") or meeting.get("starts_at") or "")[:10]
+    return close_attendees, title, date_str
 
-    meeting_title = (meeting.get("title") or "").lower().strip()
+
+def _score_meeting_match(close_attendees, close_title, close_date,
+                         candidate_emails, candidate_title, candidate_date):
+    """Score how well a candidate meeting matches a Close meeting.
+
+    Scoring:
+        +10 per overlapping non-team email
+        +8 exact title match
+        +5 partial title match (one contains the other)
+        +2 same-date match
+    """
+    score = 0
+
+    # Email overlap
+    overlap = close_attendees & candidate_emails
+    if overlap:
+        score += 10 * len(overlap)
+
+    # Title similarity
+    if close_title and candidate_title:
+        if close_title == candidate_title:
+            score += 8
+        elif close_title in candidate_title or candidate_title in close_title:
+            score += 5
+
+    # Date proximity
+    if close_date and candidate_date and close_date == candidate_date:
+        score += 2
+
+    return score
+
+
+def match_granola_sheet(meeting, sheet_rows):
+    """Match a Close.com meeting to a Granola Sheet row.
+
+    Match by attendee email overlap, title match, and date proximity.
+    Returns the row dict if matched, None otherwise.
+    """
+    close_attendees, close_title, close_date = _get_close_meeting_context(meeting)
 
     best_match = None
     best_score = 0
 
     for row in sheet_rows:
-        score = 0
-
-        # Attendee email overlap
         row_attendees = set()
         for email in (row.get("Attendees") or "").split(","):
             email = email.strip().lower()
             if email:
                 row_attendees.add(email)
 
-        overlap = close_attendees & row_attendees
-        if overlap:
-            score += 10 * len(overlap)
-
-        # Title match
         row_title = (row.get("Title") or "").lower().strip()
-        if meeting_title and meeting_title == row_title:
-            score += 8
-        elif meeting_title and (meeting_title in row_title or row_title in meeting_title):
-            score += 5
+        row_date = (row.get("Time") or "")[:10]
+
+        score = _score_meeting_match(
+            close_attendees, close_title, close_date,
+            row_attendees, row_title, row_date,
+        )
 
         if score > best_score:
             best_score = score
             best_match = row
 
-    if best_score >= 5:
+    if best_score >= MATCH_THRESHOLD:
         return best_match
     return None
 
@@ -1186,8 +1239,8 @@ def extract_sheet_notes(row):
 
     if transcript:
         # Cap transcript to stay within prompt limits
-        if len(transcript) > 6000:
-            transcript = transcript[:6000] + "\n[...transcript truncated]"
+        if len(transcript) > TRANSCRIPT_CAP_SHEET:
+            transcript = transcript[:TRANSCRIPT_CAP_SHEET] + "\n[...transcript truncated]"
         parts.append("CALL TRANSCRIPT:\n" + transcript)
 
     return "\n\n".join(parts)
@@ -1225,67 +1278,55 @@ def load_granola_cache():
 
 
 def match_granola(meeting, granola_docs):
-    """
-    Match a Close.com meeting to a Granola document.
+    """Match a Close.com meeting to a Granola document.
 
-    Strategy:
-    1. Match by attendee email overlap (non-team emails)
-    2. Fallback: match by meeting title similarity
+    Uses shared scoring via _score_meeting_match, with emails gathered
+    from both google_calendar_event and people fields.
     """
-    # Get non-team attendee emails from the Close meeting
-    close_attendees = set()
-    for a in meeting.get("attendees", []):
-        email = (a.get("email") or "").lower()
-        if email and email not in TEAM_EMAILS:
-            close_attendees.add(email)
-
-    meeting_title = (meeting.get("title") or "").lower().strip()
-    meeting_date = meeting.get("date_created", "")[:10]  # YYYY-MM-DD
+    close_attendees, close_title, close_date = _get_close_meeting_context(meeting)
 
     best_match = None
     best_score = 0
 
     for doc_id, doc in granola_docs.items():
-        score = 0
-
-        # Check attendee email overlap via google_calendar_event
+        # Gather candidate emails from calendar event and people field
         gcal = doc.get("google_calendar_event") or {}
-        gcal_attendees = set()
+        candidate_emails = set()
         for a in gcal.get("attendees", []):
-            gcal_attendees.add((a.get("email") or "").lower())
+            candidate_emails.add((a.get("email") or "").lower())
 
-        # Also check the people field
         people = doc.get("people") or {}
         if isinstance(people, dict):
             for p_list in people.values():
                 if isinstance(p_list, list):
                     for p in p_list:
                         if isinstance(p, dict):
-                            gcal_attendees.add((p.get("email") or "").lower())
+                            candidate_emails.add((p.get("email") or "").lower())
 
-        # Score: email overlap with non-team attendees
-        overlap = close_attendees & gcal_attendees
-        if overlap:
-            score += 10 * len(overlap)
-
-        # Score: title similarity
+        # Use doc title or gcal summary, whichever is present
         doc_title = (doc.get("title") or "").lower().strip()
         gcal_title = (gcal.get("summary") or "").lower().strip()
-        if meeting_title and (meeting_title in doc_title or meeting_title in gcal_title):
-            score += 5
-        elif doc_title and doc_title in meeting_title:
-            score += 3
+        candidate_title = doc_title or gcal_title
 
-        # Score: date proximity
         doc_date = (doc.get("created_at") or "")[:10]
-        if doc_date == meeting_date:
-            score += 2
+
+        score = _score_meeting_match(
+            close_attendees, close_title, close_date,
+            candidate_emails, candidate_title, doc_date,
+        )
+        # Bonus: also check gcal title if different from doc title
+        if gcal_title and gcal_title != candidate_title:
+            alt_score = _score_meeting_match(
+                close_attendees, close_title, close_date,
+                candidate_emails, gcal_title, doc_date,
+            )
+            score = max(score, alt_score)
 
         if score > best_score:
             best_score = score
             best_match = doc
 
-    if best_score >= 5:
+    if best_score >= MATCH_THRESHOLD:
         return best_match
     return None
 
@@ -1326,8 +1367,8 @@ def extract_granola_notes(doc, transcripts_dict=None):
             if lines:
                 # Cap at ~4000 chars to stay within prompt limits
                 transcript_text = "\n".join(lines)
-                if len(transcript_text) > 4000:
-                    transcript_text = transcript_text[:4000] + "\n[...transcript truncated]"
+                if len(transcript_text) > TRANSCRIPT_CAP_LOCAL:
+                    transcript_text = transcript_text[:TRANSCRIPT_CAP_LOCAL] + "\n[...transcript truncated]"
                 parts.append("CALL TRANSCRIPT:\n" + transcript_text)
 
     return "\n\n".join(parts)
@@ -1414,7 +1455,6 @@ def mcp_list_meetings(client: "GranolaMCPClient", since_dt: datetime, until_dt: 
     meetings = []
     if not text:
         return meetings
-    import re
     # Split into <meeting ...> ... </meeting> blocks so we can extract participants.
     for m in re.finditer(r'<meeting id="([^"]+)" title="([^"]*)" date="([^"]*)">(.*?)</meeting>', text, flags=re.DOTALL):
         mid, title, date_str, inner = m.group(1), m.group(2), m.group(3), m.group(4)
@@ -1425,50 +1465,46 @@ def mcp_list_meetings(client: "GranolaMCPClient", since_dt: datetime, until_dt: 
 
 def mcp_match_meeting(close_meeting: dict, mcp_meetings: list) -> dict | None:
     """Match a Close meeting to a Granola MCP meeting list."""
-    close_attendees = set()
-    for a in close_meeting.get("attendees", []):
-        email = (a.get("email") or "").lower()
-        if email and email not in TEAM_EMAILS:
-            close_attendees.add(email)
+    close_attendees, close_title, _ = _get_close_meeting_context(close_meeting)
 
-    meeting_title = (close_meeting.get("title") or "").lower().strip()
-    # Compare on date only with +/-1 day tolerance (timezone differences).
+    # Parse Close date for comparison (MCP uses a different date format)
     starts_at = close_meeting.get("starts_at", "")
-    close_date = None
+    close_date_obj = None
     if starts_at:
         try:
-            close_date = datetime.fromisoformat(starts_at.replace("Z", "+00:00")).date()
+            close_date_obj = datetime.fromisoformat(starts_at.replace("Z", "+00:00")).date()
         except (ValueError, TypeError):
-            close_date = None
+            pass
 
     best = None
     best_score = 0
     for gm in mcp_meetings:
-        score = 0
-        overlap = close_attendees & (gm.get("emails") or set())
-        if overlap:
-            score += 10 * len(overlap)
+        candidate_emails = gm.get("emails") or set()
+        candidate_title = (gm.get("title") or "").lower().strip()
 
-        gtitle = (gm.get("title") or "").lower().strip()
-        if meeting_title and gtitle:
-            if meeting_title == gtitle:
-                score += 8
-            elif meeting_title in gtitle or gtitle in meeting_title:
-                score += 5
-
-        if close_date and gm.get("date_str"):
+        # MCP dates are formatted as "Feb 10, 2026 2:00 PM", need special parsing
+        candidate_date = ""
+        if close_date_obj and gm.get("date_str"):
             try:
                 gdt = datetime.strptime(gm["date_str"], "%b %d, %Y %I:%M %p").date()
-                if abs((gdt - close_date).days) <= 1:
-                    score += 2
+                # +/-1 day tolerance for timezone differences
+                if abs((gdt - close_date_obj).days) <= 1:
+                    candidate_date = close_date_obj.isoformat()
             except Exception:
                 pass
+
+        close_date_str = close_date_obj.isoformat() if close_date_obj else ""
+
+        score = _score_meeting_match(
+            close_attendees, close_title, close_date_str,
+            candidate_emails, candidate_title, candidate_date,
+        )
 
         if score > best_score:
             best_score = score
             best = gm
 
-    if best_score >= 5:
+    if best_score >= MATCH_THRESHOLD:
         return best
     return None
 
@@ -1500,7 +1536,6 @@ def _extract_text_from_prosemirror(node):
 
 def _parse_ai_sections(text: str) -> dict:
     """Parse model output into draft/reasoning/priority sections if present."""
-    import re
     out = {"draft": "", "reasoning": "", "priority": "", "raw": text or ""}
     s = (text or "").strip()
     if not s:
@@ -1545,7 +1580,7 @@ def load_reference_file(path):
 
 def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
                              fu_number=1, sent_emails=None, cadence_type="active",
-                             no_show=False):
+                             no_show=False, sales_scripts=None, followup_examples=None):
     """Send lead context + call notes to Claude, get summary + follow-up draft.
 
     Args:
@@ -1579,8 +1614,10 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
     why_reaching_out = custom.get("Why are you reaching out", "N/A")
     meeting_status = custom.get("Meeting Status", "N/A")
 
-    sales_scripts = load_reference_file(SALES_SCRIPTS_PATH)
-    followup_examples = load_reference_file(FOLLOWUP_EXAMPLES_PATH)
+    if sales_scripts is None:
+        sales_scripts = load_reference_file(SALES_SCRIPTS_PATH)
+    if followup_examples is None:
+        followup_examples = load_reference_file(FOLLOWUP_EXAMPLES_PATH)
 
     # Get cadence details for this FU number
     cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
@@ -1655,10 +1692,10 @@ CALL NOTES FROM GRANOLA:
 {call_notes if call_notes else "(No transcript available - generate follow-up based on lead context only)"}
 
 SALES SCRIPTS (reference these ONLY if a specific topic from the transcript matches):
-{sales_scripts[:3000] if sales_scripts else "(Not available)"}
+{sales_scripts[:SALES_SCRIPTS_CAP] if sales_scripts else "(Not available)"}
 
 FOLLOW-UP EMAIL EXAMPLES (match this voice exactly):
-{followup_examples[:2000] if followup_examples else "(Not available)"}
+{followup_examples[:FOLLOWUP_EXAMPLES_CAP] if followup_examples else "(Not available)"}
 
 KEY RESOURCES YOU CAN REFERENCE:
 - Example report: https://www.lightworkhome.com/examplereport (password: homehealth)
@@ -1757,8 +1794,9 @@ PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
         return "\n".join(text_parts).strip()
 
     raw = _call_model(prompt)
-    # Post-check and rewrite loop (avoid link hallucinations + generic "AI slop").
-    for attempt in range(2):
+    # Post-check and rewrite loop (avoid link hallucinations, em dashes, AI slop).
+    max_rewrites = 3
+    for attempt in range(max_rewrites):
         parsed = _parse_ai_sections(raw)
         draft = parsed.get("draft") or parsed.get("raw") or ""
         issues = _lint_email_draft(draft, int(fu_number), days_since_call)
@@ -1773,50 +1811,14 @@ PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
         )
         raw = _call_model(fix_prompt)
 
-    return raw
+    # Log if issues persist after all rewrite attempts
+    remaining = _lint_email_draft(
+        (_parse_ai_sections(raw).get("draft") or raw or "").strip(),
+        int(fu_number), days_since_call,
+    )
+    if remaining:
+        print(f"  Warning: draft still has issues after {max_rewrites} rewrites: {remaining}")
 
-    if AI_PROVIDER == "openai":
-        if not OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY missing (required for AI_PROVIDER=openai)")
-
-        body = {
-            "model": OPENAI_MODEL,
-            "input": prompt,
-            "reasoning": {"effort": OPENAI_REASONING_EFFORT},
-        }
-        resp = _request(
-            "POST",
-            OPENAI_API_URL,
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            body=body,
-        )
-
-        # Prefer output_text if present; else parse message content blocks.
-        if isinstance(resp, dict) and isinstance(resp.get("output_text"), str) and resp["output_text"].strip():
-            return resp["output_text"].strip()
-
-        parts = []
-        for item in resp.get("output", []) if isinstance(resp, dict) else []:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") != "message":
-                continue
-            for c in item.get("content", []) or []:
-                if not isinstance(c, dict):
-                    continue
-                if c.get("type") in ("output_text", "text"):
-                    txt = c.get("text") or ""
-                    if txt:
-                        parts.append(txt)
-        text = "\n".join(parts).strip()
-        if not text:
-            raise RuntimeError(f"OpenAI response missing text: keys={list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
-        return text
-
-    # Unreachable (kept to reduce diff churn if you need to revert pieces).
     return raw
 
 
@@ -1848,8 +1850,6 @@ def build_tracker_view(all_leads_status):
     Args:
         all_leads_status: list of dicts with owner_name from get_leads_due_today()
     """
-    import html as html_mod
-
     # Group by owner
     by_owner = {}
     for entry in all_leads_status:
@@ -1985,9 +1985,6 @@ def build_lead_section(lead_info, claude_output, granola_found,
                        days_overdue=0, sent_emails=None, cadence_type="active",
                        no_show=False):
     """Build one lead's section for the digest email."""
-    import html as html_mod
-    import json as json_mod
-
     custom = lead_info.get("custom", {})
     contacts = lead_info.get("contacts", [])
     addresses = lead_info.get("addresses", [])
@@ -2110,10 +2107,10 @@ def build_lead_section(lead_info, claude_output, granola_found,
         {transcript_chip}
       </div>
       <div style="display:flex; gap:8px; align-items:center; margin:10px 0 8px 0;">
-        <button class="lw-copy-btn" data-copy-text={html_mod.escape(json_mod.dumps(copy_body))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
+        <button class="lw-copy-btn" data-copy-text={html_mod.escape(json.dumps(copy_body))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
           Copy draft
         </button>
-        <button class="lw-copy-btn" data-copy-text={html_mod.escape(json_mod.dumps(copy_all))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
+        <button class="lw-copy-btn" data-copy-text={html_mod.escape(json.dumps(copy_all))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
           Copy subject + draft
         </button>
       </div>
@@ -2142,9 +2139,6 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
                       action_items_by_owner=None,
                       run_meta=None):
     """Build the full HTML digest email."""
-    import html as html_mod
-    import json as json_mod
-
     if action_items_by_owner is None:
         action_items_by_owner = {}
     if run_meta is None:
@@ -2176,10 +2170,10 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
               </td>
               <td style="padding:8px 6px; font-size:12px; text-align:center; color:#666;">{html_mod.escape(it.get('transcript_label',''))}</td>
               <td style="padding:8px 6px; text-align:right; white-space:nowrap;">
-                <button class="lw-copy-btn" data-copy-text={html_mod.escape(json_mod.dumps(it.get('copy_draft','')))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
+                <button class="lw-copy-btn" data-copy-text={html_mod.escape(json.dumps(it.get('copy_draft','')))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
                   Copy
                 </button>
-                <button class="lw-copy-btn" data-copy-text={html_mod.escape(json_mod.dumps(it.get('copy_all','')))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer; margin-left:6px;">
+                <button class="lw-copy-btn" data-copy-text={html_mod.escape(json.dumps(it.get('copy_all','')))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer; margin-left:6px;">
                   Copy + Subject
                 </button>
               </td>
@@ -2547,6 +2541,17 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 
 
 def main():
+    # Validate required env vars early
+    if not CLOSE_API_KEY:
+        print("Error: CLOSE_API_KEY not set. Add it to .env or export it.")
+        return
+    if not SKIP_CLAUDE and AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
+        print("Error: ANTHROPIC_API_KEY not set. Add it to .env or set SKIP_CLAUDE=1.")
+        return
+    if not SKIP_CLAUDE and AI_PROVIDER == "openai" and not OPENAI_API_KEY:
+        print("Error: OPENAI_API_KEY not set. Add it to .env or set SKIP_CLAUDE=1.")
+        return
+
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%b %-d, %Y")
     last_run_str = now.astimezone().strftime("%Y-%m-%d %H:%M")
@@ -2554,16 +2559,20 @@ def main():
     print(f"Lightwork Follow-Up Digest - {date_str}")
     print("=" * 60)
 
-    # 1. Get Customer Leads with calls in last 45 days
-    customer_leads = get_recent_customer_leads()
+    # 1. Fetch all meetings once, then filter for completed and no-show
+    since = now - timedelta(days=CADENCE_LOOKBACK_DAYS)
+    print(f"Fetching all meetings from last {CADENCE_LOOKBACK_DAYS} days...")
+    all_raw_meetings = _fetch_all_meetings(since, now)
+    print(f"  {len(all_raw_meetings)} total meetings fetched")
+
+    customer_leads = get_recent_customer_leads(all_meetings=all_raw_meetings)
 
     if not customer_leads:
         print("No Customer Leads with recent calls. Nothing to digest.")
         return
 
     # Flag leads that had a canceled/no-show style meeting in the cadence window.
-    since = now - timedelta(days=CADENCE_LOOKBACK_DAYS)
-    no_show_lead_ids = get_no_show_lead_ids(since, now)
+    no_show_lead_ids = get_no_show_lead_ids(since, now, all_meetings=all_raw_meetings)
     for lead_id, info in customer_leads.items():
         info["no_show"] = lead_id in no_show_lead_ids
 
@@ -2637,7 +2646,6 @@ def main():
         output_path = SCRIPT_DIR / "digest_preview.html"
         output_path.write_text(html)
         print(f"\nNo follow-ups due today. Tracker saved to {output_path}")
-        import subprocess
         subprocess.run(["open", str(output_path)])
         return
 
@@ -2649,6 +2657,10 @@ def main():
         print(f"\n{total_due} leads due for follow-up today")
 
     # 4. Process each due lead
+    # Load reference files once for all leads
+    cached_sales_scripts = load_reference_file(SALES_SCRIPTS_PATH)
+    cached_followup_examples = load_reference_file(FOLLOWUP_EXAMPLES_PATH)
+
     sections_by_owner = {}
     action_items_by_owner = {}
     missing_transcripts_count = 0
@@ -2701,10 +2713,10 @@ def main():
                     mcp_transcripts[mid] = transcript
                 if transcript:
                     transcript_present = True
-                    call_notes = "CALL TRANSCRIPT:\n" + transcript[:6000]
+                    call_notes = "CALL TRANSCRIPT:\n" + transcript[:TRANSCRIPT_CAP_SHEET]
                     print("  Transcript: Granola MCP")
 
-        if (not no_show) and sheet_rows:
+        if (not no_show) and (not transcript_present) and (not call_notes) and sheet_rows:
             sheet_match = match_granola_sheet(earliest_meeting, sheet_rows)
             if sheet_match:
                 call_notes = extract_sheet_notes(sheet_match)
@@ -2742,6 +2754,8 @@ def main():
                     fu_number=fu_number, sent_emails=sent_emails,
                     cadence_type=cadence_type,
                     no_show=no_show,
+                    sales_scripts=cached_sales_scripts,
+                    followup_examples=cached_followup_examples,
                 )
             except Exception as e:
                 print(f"  Error from Claude: {e}")
@@ -2803,7 +2817,6 @@ def main():
     print(f"{total_leads} lead{'s' if total_leads != 1 else ''} due for follow-up")
 
     # Auto-open in browser
-    import subprocess
     subprocess.run(["open", str(output_path)])
 
 

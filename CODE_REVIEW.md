@@ -1,62 +1,118 @@
 # Code Review: post_call_digest.py
 
-## Security: PASS
+**Reviewed:** Feb 11, 2026 | **Commit:** ac327eb
 
-| Check | Status | Details |
-|-------|--------|---------|
-| Close.com write access | BLOCKED | Line 134: `_request()` raises RuntimeError on any non-GET to `api.close.com` |
-| Close.com function scope | SAFE | Only `close_get()` exists. No POST/PUT/DELETE functions. |
-| SMTP / email sending | REMOVED | No `smtplib`, no `MIMEMultipart`, no send function, no SMTP creds in .env |
-| Lead email usage | SAFE | `lead_email` (line 689) only appears as text in Claude prompt (line 726). Never in any recipient field. |
-| Outbound connections | 3 total | Close.com (GET only), Google Sheets (GET only), Anthropic API (POST, generates text) |
-| Can this script contact a lead? | NO | Impossible. No email sending capability. No Close.com write access. |
+---
 
-## Logic: 2 Issues Found
+## Critical Issues
 
-### Issue 1: `GRANOLA_LIST_ID` is unused (line 46)
+### 1. Dead code after `return` (lines 1778-1820)
+Lines 1778-1820 are completely unreachable. `generate_digest_for_call()` returns at line 1776, but there's a duplicate copy of the OpenAI API call logic sitting below it that can never execute. Looks like a merge artifact. Delete it.
 
-```python
-GRANOLA_LIST_ID = "77691bba-7fa9-471c-b9a1-f6a953ef27c4"
-```
+### 2. Duplicate Close.com API call for meetings
+`get_meetings_in_range()` (line 723) and `get_no_show_lead_ids()` (line 854) both make the same paginated API call to `/activity/meeting/` with nearly identical pagination logic. This doubles your Close.com API usage for meetings.
 
-Dead code. The local cache loads the full document store, not by list ID. Can be removed.
+**Fix:** Fetch all meetings once, then filter by status (completed vs. canceled/no-show) downstream.
 
-### Issue 2: Blank line / extra whitespace at line 114
+### 3. Reference files loaded per-lead, not per-run
+`load_reference_file()` is called twice inside `generate_digest_for_call()` (lines 1582-1583), which runs once per lead. With 8 leads, that's 16 file reads of the same two files.
 
-```python
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+**Fix:** Load `sales-scripts.md` and `follow-up-examples.md` once in `main()` and pass them in.
 
-
-GRANOLA_CACHE = os.environ.get(
-```
-
-Extra blank line from the SMTP removal. Cosmetic only.
-
-## Architecture: Clean
-
-- Single file, stdlib only, no dependencies
-- Clear separation: Config > API > Granola > Claude > HTML > Main
-- Rate limiting on Close.com calls (0.25s delay)
-- Backlog cap at 8 leads per digest
-- Fresh-email-only counting (filters Re:/Fwd:/[INT])
-- Test leads excluded ("testing" in name)
+---
 
 ## Performance
 
-- ~62 Customer Leads with meetings in the 45-day window
-- Each lead requires 1 API call to check email count (in `get_leads_due_today`)
-- Total runtime: ~2.5 min for status checks + ~30s per lead for Claude generation
-- With 8-lead cap: ~6.5 min total runtime. Acceptable for a daily batch job.
+### 4. Sequential transcript lookups
+In `main()` (lines 2599-2625), transcript matching and MCP fetches happen sequentially for every lead. Each MCP transcript fetch is a network call. With 20 leads, that's 20 back-to-back HTTP requests.
 
-## Potential Improvement (not a bug)
+**Fix:** Use `concurrent.futures.ThreadPoolExecutor` to parallelize. You already import `threading` for the OAuth flow.
 
-The `_is_fresh_followup` filter (line 314) uses subject prefix matching. This correctly filters:
-- "Re: Water Testing" (thread reply, not a follow-up)
-- "Re: Accepted: Lightwork Home Health test call" (calendar reply)
-- "Fwd: Water Testing" (forward)
+### 5. `import re` scattered inside functions
+`import re` appears at lines 206, 328, 346, 1002, 1417, 1502. Same for `import html` (lines 1851, 1988, 2145) and `import subprocess` (lines 529, 2640, 2807). Move all to top-level imports. Python caches them after the first import, but it's messy.
 
-But it would incorrectly count internal transfer emails like "Jordan Huelskamp <=> David Silver" as follow-ups since they don't start with Re:/Fwd:. Low impact since these are rare.
+---
 
-## Summary
+## Code Quality
 
-The script is clean, secure, and correctly implements the 7-touch cadence system. The two issues found are cosmetic (dead constant, extra blank line). No functional bugs.
+### 6. Three nearly identical meeting-matching functions
+- `match_granola_sheet()` (line 1127): matches Close meeting to Sheet row
+- `match_granola()` (line 1227): matches Close meeting to local cache doc
+- `mcp_match_meeting()` (line 1426): matches Close meeting to MCP meeting
+
+All three use the same scoring logic: 10 points per email overlap, 5-8 for title match, 2 for date proximity, threshold of 5.
+
+**Fix:** Extract a shared `score_meeting_match()` function. Each caller just needs to extract emails/title/date from its source format, then call the shared scorer.
+
+### 7. `main()` is 260+ lines
+It handles fetching leads, matching transcripts, generating drafts, building HTML, and opening the browser. Hard to test or modify one piece.
+
+**Fix:** Break into named functions:
+- `fetch_and_annotate_leads()` - Close API + transcript annotation
+- `generate_drafts(due_leads)` - Claude calls + section building
+- `output_digest(sections, tracker)` - HTML assembly + file write
+
+### 8. ~800 lines of inline HTML/CSS/JS
+The `build_tracker_view()`, `build_lead_section()`, and `build_digest_html()` functions are mostly HTML string literals with f-string interpolation and brace escaping (`{{`/`}}`). Any UI change requires editing Python strings.
+
+**Fix:** Extract the HTML template to a separate file (`template.html`) and use `string.Template` or simple `str.replace()` for placeholders. Or at minimum, move the CSS/JS to separate strings at module level.
+
+### 9. Magic numbers
+Scattered constants with no names:
+- Transcript caps: `6000`, `4000`, `3000`, `2000`, `500` chars
+- Match threshold: `5` (used in three places)
+- OAuth timeout: `180` seconds
+- Retry backoff: `0.8 * attempt`
+
+Make these named constants at the top.
+
+---
+
+## Reliability
+
+### 10. No early validation of required env vars
+If `.env` is missing or doesn't have `CLOSE_API_KEY`, the script fails deep inside an API call with a confusing urllib error. Add a check at startup:
+
+```python
+if not CLOSE_API_KEY:
+    print("Error: CLOSE_API_KEY not set.")
+    sys.exit(1)
+```
+
+### 11. Google Sheet matching doesn't use date proximity
+`match_granola_sheet()` scores by email overlap and title, but not by date. The local cache matcher (`match_granola`) and MCP matcher both include date proximity scoring. If the same lead had two calls, the Sheet matcher might pick the wrong one.
+
+### 12. OAuth token file has no permission restrictions
+`_save_json()` writes tokens as world-readable JSON. Add `os.chmod(path, 0o600)` after writing.
+
+---
+
+## Feature Ideas
+
+### 13. `argparse` for CLI options
+Add flags like:
+- `--dry-run`: skip Claude, just show which leads are due
+- `--owner Jay`: only process one owner's leads
+- `--no-open`: don't auto-launch browser
+- `--max N`: override MAX_LEADS_PER_DIGEST
+
+### 14. Skip-lead mechanism
+A `skip_leads.txt` file (one lead ID or name per line) would let users exclude specific leads without touching code. Useful when someone says "I'll handle this one manually."
+
+### 15. Run deduplication
+If the script runs twice in a day, it regenerates the same drafts and burns API credits. A lightweight `last_run.json` mapping `lead_id -> {fu_number, date, draft_hash}` could skip leads that already have today's draft.
+
+### 16. Summary stats after run
+Print a quick summary: how many drafts generated with vs. without transcripts, how many overdue vs. due today, total API calls made, runtime. Helps gauge output quality at a glance.
+
+---
+
+## Priority Order
+
+If I had to pick the top 5 changes to make:
+
+1. Delete the dead code (lines 1778-1820)
+2. Deduplicate the meetings API call
+3. Cache reference files per-run instead of per-lead
+4. Add `argparse` with `--dry-run` and `--owner`
+5. Extract shared meeting-matching function
