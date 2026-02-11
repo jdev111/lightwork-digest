@@ -63,6 +63,9 @@ TEAM_EMAIL_TO_NAME = {
     "josh@lightworkhome.com": "Josh",
 }
 
+# Owner tabs should always be visible, even if one owner has zero due leads.
+OWNER_TAB_ORDER = ["Jay", "Johnny", "Dom", "Unassigned"]
+
 # Sender signatures by owner (used for draft sign-off).
 OWNER_SIGNATURE = {
     "Jay": "Jay\nCo-founder | Lightwork Home Health",
@@ -848,6 +851,53 @@ def get_recent_customer_leads():
     return result
 
 
+def get_no_show_lead_ids(since_date, until_date=None):
+    """Return lead_ids with at least one no-show style meeting in range."""
+    now = datetime.now(timezone.utc)
+    if until_date is None:
+        until_date = now
+
+    no_show_statuses = {"canceled", "declined-by-lead", "no-show", "noshow"}
+    all_meetings = []
+    has_more = True
+    skip = 0
+
+    while has_more:
+        data = close_get(
+            "/activity/meeting/",
+            {
+                "date_created__gte": (since_date - timedelta(days=7)).strftime(
+                    "%Y-%m-%dT%H:%M:%S+00:00"
+                ),
+                "_limit": 100,
+                "_skip": skip,
+            },
+        )
+        meetings = data.get("data", [])
+        all_meetings.extend(meetings)
+        has_more = data.get("has_more", False)
+        skip += len(meetings)
+
+    no_show_leads = set()
+    for m in all_meetings:
+        lead_id = m.get("lead_id", "")
+        if not lead_id:
+            continue
+        status = (m.get("status") or "").lower().strip()
+        if status not in no_show_statuses:
+            continue
+        starts_at = m.get("starts_at", "")
+        if not starts_at:
+            continue
+        try:
+            start_dt = datetime.fromisoformat(starts_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if since_date <= start_dt < until_date:
+            no_show_leads.add(lead_id)
+    return no_show_leads
+
+
 def get_lead_details(lead_id):
     """Fetch lead info from Close.com."""
     return close_get(f"/lead/{lead_id}/")
@@ -979,6 +1029,7 @@ def get_leads_due_today(customer_leads):
         cadence_type = info.get("cadence_type", "active")
         transcript_label = info.get("transcript_label", "No")
         mcp_meeting_id = info.get("mcp_meeting_id")
+        no_show = bool(info.get("no_show"))
 
         # Pick the right cadence
         cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
@@ -1012,6 +1063,7 @@ def get_leads_due_today(customer_leads):
             "max_touches": max_touches,
             "transcript_label": transcript_label,
             "mcp_meeting_id": mcp_meeting_id,
+            "no_show": no_show,
         })
 
         if next_fu > max_touches:
@@ -1032,6 +1084,7 @@ def get_leads_due_today(customer_leads):
                 "owner_name": info["owner_name"],
                 "cadence_type": cadence_type,
                 "mcp_meeting_id": mcp_meeting_id,
+                "no_show": no_show,
             })
             status = "DUE TODAY" if days_overdue == 0 else f"OVERDUE by {days_overdue}d"
             tag = " [NURTURE]" if cadence_type == "nurture" else ""
@@ -1491,7 +1544,8 @@ def load_reference_file(path):
 
 
 def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
-                             fu_number=1, sent_emails=None, cadence_type="active"):
+                             fu_number=1, sent_emails=None, cadence_type="active",
+                             no_show=False):
     """Send lead context + call notes to Claude, get summary + follow-up draft.
 
     Args:
@@ -1501,6 +1555,7 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
         fu_number: Which follow-up number (1-7) to generate
         sent_emails: List of dicts with subject/body of prior emails sent
         cadence_type: "active" for standard 7-touch, "nurture" for long-term
+        no_show: True when the most recent meeting was canceled/no-show
     """
     custom = lead_info.get("custom", {})
     contacts = lead_info.get("contacts", [])
@@ -1546,6 +1601,7 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
         prior_emails_text = "\n\n".join(parts)
 
     cadence_label = "LONG-TERM NURTURE" if cadence_type == "nurture" else "ACTIVE"
+    message_mode = "NO-SHOW FOLLOW-UP" if no_show else cadence_label
 
     meeting_starts_at = meeting.get("starts_at", "")
     days_since_call = None
@@ -1561,16 +1617,17 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
 
     prompt = f"""You are writing follow-up #{fu_number} of {max_touches} for {sender} at Lightwork Home Health, an environmental health consulting company.
 
-CADENCE TYPE: {cadence_label}
+CADENCE TYPE: {message_mode}
 {"This lead previously said they are not interested right now. This is a low-pressure, value-only nurture email. NO asks, NO scheduling mentions, NO pressure. Just share something genuinely useful." if cadence_type == "nurture" else ""}
+{"This lead was a no-show or canceled. Write a short, calm no-show follow-up: acknowledge the missed connection in one line, offer a simple path to reschedule, and include one useful takeaway/resource without pressure. The Andrew Wilkinson write-up is allowed when relevant." if no_show else ""}
 
 THIS IS FOLLOW-UP #{fu_number} ({fu_type})
 Day {day_offset} after the initial call.
 
 EMAIL STRUCTURE (default):
-1) 1 line referencing something specific from the call
+1) {"1 line acknowledging the missed call briefly and politely" if no_show else "1 line referencing something specific from the call"}
 2) 1 useful resource or actionable tip (ONLY if it matches what they discussed)
-3) Soft, optional next step (questions, or confirm they want to move forward)
+3) {"Simple reschedule option with no pressure" if no_show else "Soft, optional next step (questions, or confirm they want to move forward)"}
 4) Short sign-off using this exact signature:
 {sender_signature}
 
@@ -1615,6 +1672,7 @@ IMPORTANT RULES:
 - Do NOT imply anything is scheduled or confirmed (no "looking forward to our visit", no specific dates) unless the transcript explicitly confirms it. Use optional next-step language instead (e.g., "If you'd like, we can...").
 - Do NOT use "today" or "yesterday" unless the call was actually within the last 2 days.
 - Do NOT use generic sales-email filler ("just checking in", "circling back", "touching base").
+- {"Because this is a no-show follow-up: do not pretend a conversation already happened. No references to details that were supposedly discussed unless they exist in transcript notes." if no_show else "Avoid assumptions that weren't clearly discussed."}
 - LINKS: Only include links from this allowlist. Otherwise, do not include a link.
   Allowed prefixes: {", ".join(ALLOWED_URL_PREFIXES)}
 - Never use em dashes.
@@ -1790,6 +1848,8 @@ def build_tracker_view(all_leads_status):
     Args:
         all_leads_status: list of dicts with owner_name from get_leads_due_today()
     """
+    import html as html_mod
+
     # Group by owner
     by_owner = {}
     for entry in all_leads_status:
@@ -1800,8 +1860,18 @@ def build_tracker_view(all_leads_status):
     for owner in by_owner:
         by_owner[owner].sort(key=lambda x: x.get("due_date") or datetime.max.replace(tzinfo=timezone.utc))
 
+    ordered_owners = []
+    seen = set()
+    for o in OWNER_TAB_ORDER:
+        if o in by_owner:
+            ordered_owners.append(o)
+            seen.add(o)
+    for o in sorted(by_owner.keys()):
+        if o not in seen:
+            ordered_owners.append(o)
+
     owner_tables = ""
-    for owner in sorted(by_owner.keys()):
+    for owner in ordered_owners:
         leads = by_owner[owner]
         rows_html = ""
         for entry in leads:
@@ -1816,6 +1886,9 @@ def build_tracker_view(all_leads_status):
             max_touches = entry.get("max_touches", 7)
             cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
             transcript_label = entry.get("transcript_label", "No")
+            no_show = bool(entry.get("no_show"))
+            transcript_lower = transcript_label.lower()
+            transcript_state = "yes" if (transcript_lower.startswith("yes") or transcript_lower.startswith("no-show")) else "no"
 
             # Nurture badge
             nurture_badge = ""
@@ -1823,6 +1896,12 @@ def build_tracker_view(all_leads_status):
                 nurture_badge = (
                     ' <span style="background:#8e44ad; color:white; font-size:9px; '
                     'padding:1px 4px; border-radius:2px; vertical-align:middle;">NURTURE</span>'
+                )
+            no_show_badge = ""
+            if no_show:
+                no_show_badge = (
+                    ' <span style="background:#c0392b; color:white; font-size:9px; '
+                    'padding:1px 4px; border-radius:2px; vertical-align:middle; margin-left:4px;">NO-SHOW</span>'
                 )
 
             # Progress dots
@@ -1857,8 +1936,8 @@ def build_tracker_view(all_leads_status):
             name_link = f'<a href="{close_url}" style="color:#2E5B88; text-decoration:none;">{name}</a>' if close_url else name
 
             rows_html += f"""
-            <tr style="border-bottom:1px solid #eee;">
-              <td style="padding:8px 10px; font-size:13px;">{name_link}{nurture_badge}</td>
+            <tr class="lw-filter-item" data-owner="{html_mod.escape(owner)}" data-transcript="{transcript_state}" data-no-show={"1" if no_show else "0"} data-overdue={"1" if entry.get("days_overdue", 0) > 0 else "0"} style="border-bottom:1px solid #eee;">
+              <td style="padding:8px 10px; font-size:13px;">{name_link}{nurture_badge}{no_show_badge}</td>
               <td style="padding:8px 6px; font-size:12px; text-align:center; color:#666;">{transcript_label}</td>
               <td style="padding:8px 6px; font-size:13px; text-align:center;">{fu_done}/{max_touches}</td>
               <td style="padding:8px 6px;">{dots}</td>
@@ -1867,7 +1946,7 @@ def build_tracker_view(all_leads_status):
             </tr>"""
 
         owner_tables += f"""
-        <div style="margin-bottom:20px;">
+        <div class="lw-owner-group" data-owner-group="{html_mod.escape(owner)}" style="margin-bottom:20px;">
           <h3 style="background:#f0f4f8; padding:8px 12px; border-radius:4px; margin:0 0 0 0;
                      font-size:14px; color:#2E5B88; border-left:3px solid #2E5B88;">
             {owner.upper()} ({len(leads)} lead{"s" if len(leads) != 1 else ""})
@@ -1903,7 +1982,8 @@ def build_lead_section(lead_info, claude_output, granola_found,
                        owner_name="Unassigned",
                        transcript_label="",
                        fu_number=1, fu_done=0, days_since_call=0,
-                       days_overdue=0, sent_emails=None, cadence_type="active"):
+                       days_overdue=0, sent_emails=None, cadence_type="active",
+                       no_show=False):
     """Build one lead's section for the digest email."""
     import html as html_mod
     import json as json_mod
@@ -1945,6 +2025,12 @@ def build_lead_section(lead_info, claude_output, granola_found,
             f' <span style="background:#c0392b; color:white; font-size:11px; '
             f'padding:2px 6px; border-radius:3px; margin-left:6px;">'
             f'OVERDUE {days_overdue}d</span>'
+        )
+    no_show_badge = ""
+    if no_show:
+        no_show_badge = (
+            ' <span style="background:#c0392b; color:white; font-size:11px; '
+            'padding:2px 6px; border-radius:3px; margin-left:6px;">NO-SHOW</span>'
         )
 
     bar_color = "#8e44ad" if cadence_type == "nurture" else "#2E5B88"
@@ -2002,17 +2088,18 @@ def build_lead_section(lead_info, claude_output, granola_found,
         """
 
     # Copy helpers (browser preview only; email clients will ignore JS).
-    copy_subject = f"Follow-up {fu_number}: {fu_type}"
+    copy_subject = f"No-show follow-up {fu_number}: {fu_type}" if no_show else f"Follow-up {fu_number}: {fu_type}"
     copy_body = (parsed["draft"] or parsed["raw"] or "").strip()
     copy_all = f"Subject: {copy_subject}\n\n{copy_body}".strip()
     transcript_chip = ""
     if transcript_label:
         transcript_chip = f'<span style="color:#666; font-size:12px; margin-left:10px;">Transcript: {html_mod.escape(transcript_label)}</span>'
+    transcript_state = "yes" if granola_found else "no"
 
     return f"""
-    <div data-owner="{html_mod.escape(owner_name)}" style="border:1px solid {border_color}; border-radius:8px; padding:16px; margin-bottom:20px; background:#fff;">
+    <div class="lw-filter-item lw-lead-card" data-owner="{html_mod.escape(owner_name)}" data-transcript="{transcript_state}" data-no-show={"1" if no_show else "0"} data-overdue={"1" if days_overdue > 0 else "0"} style="border:1px solid {border_color}; border-radius:8px; padding:16px; margin-bottom:20px; background:#fff;">
       <h3 style="margin:0 0 4px 0; color:#1a1a1a;">
-        <a href="{close_url}" style="color:{accent_color}; text-decoration:none;">{name}</a>{location_str}{nurture_badge}{transcript_badge}{overdue_badge}
+        <a href="{close_url}" style="color:{accent_color}; text-decoration:none;">{name}</a>{location_str}{nurture_badge}{transcript_badge}{overdue_badge}{no_show_badge}
       </h3>
       <div style="font-size:13px; color:#666; margin-bottom:8px;">
         <span style="font-weight:600; color:{accent_color};">Follow-up {fu_number} of {max_touches}</span>
@@ -2063,46 +2150,13 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
     if run_meta is None:
         run_meta = {}
 
-    # Collapsible: helpful, but shouldn't clutter the daily workflow.
-    how_it_works = f"""
-    <details style="margin:0 0 28px 0; border:1px solid #ddd; border-radius:8px; padding:16px; background:#fff;">
-      <summary style="cursor:pointer; font-weight:800; font-size:18px; color:#1a1a1a;">How It Works</summary>
-      <p style="margin:10px 0 14px 0; color:#666; font-size:13px; line-height:1.5;">
-        This digest keeps post-call follow-ups moving without guessing. It pulls the right leads, pulls transcripts, and generates value-driven drafts.
-      </p>
-
-      <!-- Table layout for email/client compatibility -->
-      <table style="width:100%; border-collapse:separate; border-spacing:10px;">
-        <tr>
-          <td style="vertical-align:top; width:33.33%; border:1px solid #eee; border-radius:10px; padding:12px; background:#fbfbfb;">
-            <div style="font-size:11px; letter-spacing:0.02em; text-transform:uppercase; color:#888; font-weight:800; margin-bottom:6px;">Stage 1</div>
-            <div style="font-size:14px; font-weight:800; color:#1a1a1a; margin-bottom:6px;">Pick The Right Leads</div>
-            <div style="font-size:13px; color:#444; line-height:1.5;">
-              Pulls Customer Leads with completed calls in the last {CADENCE_LOOKBACK_DAYS} days, and excludes anyone already in a won stage (e.g. Booked Assessment).
-            </div>
-          </td>
-
-          <td style="vertical-align:top; width:33.33%; border:1px solid #eee; border-radius:10px; padding:12px; background:#fbfbfb;">
-            <div style="font-size:11px; letter-spacing:0.02em; text-transform:uppercase; color:#888; font-weight:800; margin-bottom:6px;">Stage 2</div>
-            <div style="font-size:14px; font-weight:800; color:#1a1a1a; margin-bottom:6px;">Attach Transcript Context</div>
-            <div style="font-size:13px; color:#444; line-height:1.5;">
-              Matches each call to Granola (MCP) to pull the transcript. If MCP is unavailable, it falls back to the shared Sheet or local Granola cache.
-            </div>
-          </td>
-
-          <td style="vertical-align:top; width:33.33%; border:1px solid #eee; border-radius:10px; padding:12px; background:#fbfbfb;">
-            <div style="font-size:11px; letter-spacing:0.02em; text-transform:uppercase; color:#888; font-weight:800; margin-bottom:6px;">Stage 3</div>
-            <div style="font-size:14px; font-weight:800; color:#1a1a1a; margin-bottom:6px;">Draft The Next Touch</div>
-            <div style="font-size:13px; color:#444; line-height:1.5;">
-              Generates the next follow-up in Jay's voice with value tied to what they discussed. The right-hand column shows the reasoning for the tip/resource.
-            </div>
-          </td>
-        </tr>
-      </table>
-    </details>
-    """
-
-    owners = sorted(set(list(action_items_by_owner.keys()) + list(sections_by_owner.keys())))
+    dynamic_owners = set(list(action_items_by_owner.keys()) + list(sections_by_owner.keys()))
+    owners = []
+    for o in OWNER_TAB_ORDER:
+        owners.append(o)
+        dynamic_owners.discard(o)
+    owners.extend(sorted(dynamic_owners))
+    owner_counts = {o: len(sections_by_owner.get(o, [])) for o in owners}
 
     # Compact action list at the top
     action_blocks = ""
@@ -2112,11 +2166,13 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
             continue
         rows = ""
         for it in items:
+            transcript_state = "yes" if str(it.get("transcript_state", "no")) == "yes" else "no"
             rows += f"""
-            <tr style="border-bottom:1px solid #eee;">
+            <tr class="lw-filter-item" data-owner="{html_mod.escape(owner)}" data-transcript="{transcript_state}" data-no-show={"1" if it.get('no_show') else "0"} data-overdue={"1" if it.get('overdue') else "0"} style="border-bottom:1px solid #eee;">
               <td style="padding:8px 10px; font-size:13px;">
                 <a href="{it.get('close_url','')}" style="color:#2E5B88; text-decoration:none;">{html_mod.escape(it.get('name',''))}</a>
                 <span style="color:#999; margin-left:6px; font-size:12px;">FU {it.get('fu_number')}</span>
+                {'<span style="background:#c0392b; color:white; font-size:10px; padding:1px 5px; border-radius:3px; margin-left:6px;">NO-SHOW</span>' if it.get('no_show') else ''}
               </td>
               <td style="padding:8px 6px; font-size:12px; text-align:center; color:#666;">{html_mod.escape(it.get('transcript_label',''))}</td>
               <td style="padding:8px 6px; text-align:right; white-space:nowrap;">
@@ -2130,10 +2186,11 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
             </tr>
             """
 
+        owner_slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in owner).strip("-")
         action_blocks += f"""
-        <div data-owner="{html_mod.escape(owner)}" style="margin-top:14px;">
+        <div class="lw-owner-group lw-owner-scope" data-owner-group="{html_mod.escape(owner)}" data-owner-scope="{html_mod.escape(owner)}" style="margin-top:14px;">
           <div style="font-size:12px; color:#888; font-weight:800; letter-spacing:0.02em; text-transform:uppercase; margin:0 0 6px 0;">
-            {html_mod.escape(owner)}: Action List
+            <a id="section-actions-{owner_slug}" style="color:inherit; text-decoration:none;">{html_mod.escape(owner)}: Action List</a>
           </div>
           <table style="width:100%; border-collapse:collapse; background:#fff; border:1px solid #eee; border-radius:8px; overflow:hidden;">
             <tr style="border-bottom:2px solid #ddd;">
@@ -2147,20 +2204,43 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
         """
 
     owner_blocks = ""
-    for owner, sections in sections_by_owner.items():
+    for owner in owners:
+        sections = sections_by_owner.get(owner, [])
+        if not sections:
+            continue
         count = len(sections)
+        owner_slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in owner).strip("-")
         owner_blocks += f"""
-    <div data-owner="{html_mod.escape(owner)}" style="margin-top:28px;">
+    <div class="lw-owner-group lw-owner-scope" data-owner-group="{html_mod.escape(owner)}" data-owner-scope="{html_mod.escape(owner)}" style="margin-top:28px;">
       <h2 style="background:#2E5B88; color:white; padding:10px 16px; border-radius:6px; margin:0 0 16px 0; font-size:16px;">
-        {owner.upper()}'S FOLLOW-UPS ({count})
+        <a id="section-owner-{owner_slug}" style="color:inherit; text-decoration:none;">{owner.upper()}'S FOLLOW-UPS ({count})</a>
       </h2>
       {"".join(sections)}
     </div>"""
 
     # Owner tabs
-    tab_buttons = '<button class="lw-tab active" data-owner="ALL">All</button>'
+    tab_buttons = '<button class="lw-tab active" role="tab" aria-selected="true" tabindex="0" data-owner-tab="ALL">All</button>'
     for o in owners:
-        tab_buttons += f'<button class="lw-tab" data-owner="{html_mod.escape(o)}">{html_mod.escape(o)}</button>'
+        tab_buttons += (
+            f'<button class="lw-tab" role="tab" aria-selected="false" tabindex="-1" '
+            f'data-owner-tab="{html_mod.escape(o)}">{html_mod.escape(o)} '
+            f'<span class="lw-tab-count">{owner_counts.get(o, 0)}</span></button>'
+        )
+
+    jump_links = (
+        '<a class="lw-jump" href="#section-today">Today</a>'
+        '<a class="lw-jump" href="#section-pipeline">Pipeline</a>'
+    )
+    for owner in owners:
+        owner_slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in owner).strip("-")
+        if owner_counts.get(owner, 0) > 0:
+            jump_links += (
+                f'<a class="lw-jump" href="#section-owner-{owner_slug}">{html_mod.escape(owner)}</a>'
+            )
+        else:
+            jump_links += (
+                f'<span class="lw-jump lw-jump-disabled">{html_mod.escape(owner)}</span>'
+            )
 
     last_run = run_meta.get("last_run", "")
     mcp_status = run_meta.get("mcp_status", "")
@@ -2182,10 +2262,125 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 
     return f"""<!DOCTYPE html>
 	<html>
-	<head><meta charset="utf-8"></head>
-	<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; max-width:700px; margin:0 auto; padding:20px; background:#FFFCF0; color:#1a1a1a;">
-	  <div style="position:sticky; top:0; background:#FFFCF0; padding:10px 0 12px 0; z-index:10; border-bottom:1px solid #e9e2c9; margin-bottom:14px;">
-	    <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:12px;">
+	<head>
+	  <meta charset="utf-8">
+	  <style>
+	    body {{
+	      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+	      max-width:700px;
+	      margin:0 auto;
+	      padding:20px;
+	      background:#FFFCF0;
+	      color:#1a1a1a;
+	    }}
+	    .lw-hidden {{ display:none !important; }}
+	    .lw-top {{
+	      position:fixed;
+	      top:0;
+	      left:50%;
+	      transform:translateX(-50%);
+	      width:min(700px, calc(100vw - 40px));
+	      background:#FFFCF0;
+	      padding:10px 0 12px 0;
+	      z-index:999;
+	      border-bottom:1px solid #e9e2c9;
+	    }}
+	    .lw-top-title {{
+	      display:flex;
+	      align-items:flex-end;
+	      justify-content:space-between;
+	      gap:12px;
+	    }}
+	    .lw-tabs {{
+	      display:flex;
+	      gap:6px;
+	      flex-wrap:nowrap;
+	      overflow-x:auto;
+	      padding-bottom:2px;
+	    }}
+	    .lw-tab {{
+	      border:1px solid #ddd;
+	      background:#fff;
+	      border-radius:999px;
+	      padding:6px 10px;
+	      font-size:12px;
+	      cursor:pointer;
+	      white-space:nowrap;
+	    }}
+	    .lw-tab:focus-visible {{
+	      outline:2px solid #2E5B88;
+	      outline-offset:2px;
+	    }}
+	    .lw-tab.active {{
+	      border-color:#2E5B88;
+	      background:#2E5B88;
+	      color:#fff;
+	    }}
+	    .lw-tab-count {{
+	      display:inline-block;
+	      margin-left:4px;
+	      font-size:11px;
+	      opacity:0.85;
+	    }}
+	    .lw-jumps {{
+	      display:flex;
+	      flex-wrap:nowrap;
+	      overflow-x:auto;
+	      gap:8px;
+	      margin-top:8px;
+	      padding-top:8px;
+	      border-top:1px solid #ece3c8;
+	    }}
+	    .lw-jump {{
+	      font-size:12px;
+	      color:#2E5B88;
+	      text-decoration:none;
+	      border:1px solid #d6e3f0;
+	      background:#f6fbff;
+	      border-radius:999px;
+	      padding:4px 10px;
+	      white-space:nowrap;
+	    }}
+	    .lw-jump-disabled {{
+	      color:#999;
+	      border-color:#e5e5e5;
+	      background:#f8f8f8;
+	    }}
+	    .lw-filters {{
+	      display:flex;
+	      gap:8px;
+	      flex-wrap:wrap;
+	      align-items:center;
+	      margin-top:8px;
+	    }}
+	    .lw-filter-chip {{
+	      border:1px solid #ddd;
+	      background:#fff;
+	      border-radius:999px;
+	      padding:5px 10px;
+	      font-size:12px;
+	      cursor:pointer;
+	    }}
+	    .lw-filter-chip.active {{
+	      border-color:#1e7f5c;
+	      color:#fff;
+	      background:#1e7f5c;
+	    }}
+	    .lw-count {{
+	      margin-top:8px;
+	      font-size:12px;
+	      color:#666;
+	    }}
+	    @media (max-width: 760px) {{
+	      body {{ padding:12px; }}
+	      .lw-top {{ width:calc(100vw - 24px); }}
+	      .lw-top-title {{ flex-direction:column; align-items:flex-start; }}
+	    }}
+	  </style>
+	</head>
+	<body>
+	  <div id="lwMenu" class="lw-top">
+	    <div class="lw-top-title">
 	      <div>
 	        <div style="font-size:20px; font-weight:800; color:#1a1a1a;">Lightwork Follow-Up Digest</div>
 	        <div style="margin-top:2px; color:#666; font-size:13px;">
@@ -2193,38 +2388,131 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 	          {f"&middot; Last run: {html_mod.escape(last_run)}" if last_run else ""}
 	        </div>
 	      </div>
-	      <div class="lw-tabs" style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
+	      <div class="lw-tabs" role="tablist" aria-label="Owner tabs">
 	        {tab_buttons}
 	      </div>
 	    </div>
+	    <div class="lw-filters">
+	      <span style="font-size:12px; color:#666; font-weight:700;">Filters:</span>
+	      <button class="lw-filter-chip active" data-filter-key="transcript" data-filter-value="all">Transcript: Any</button>
+	      <button class="lw-filter-chip" data-filter-key="transcript" data-filter-value="yes">Transcript: Yes</button>
+	      <button class="lw-filter-chip" data-filter-key="transcript" data-filter-value="no">Transcript: No</button>
+	      <button class="lw-filter-chip active" data-filter-key="no_show" data-filter-value="all">No-show: Any</button>
+	      <button class="lw-filter-chip" data-filter-key="no_show" data-filter-value="1">No-show only</button>
+	      <button class="lw-filter-chip active" data-filter-key="overdue" data-filter-value="all">Overdue: Any</button>
+	      <button class="lw-filter-chip" data-filter-key="overdue" data-filter-value="1">Overdue only</button>
+	    </div>
+	    <div class="lw-jumps">
+	      {jump_links}
+	    </div>
+	    <div id="lwResultCount" class="lw-count"></div>
 	  </div>
+	  <div id="lwMenuSpacer" style="height:130px;"></div>
 	  {banner}
-	  <div style="margin-bottom:18px;">
+	  <div id="section-today" style="margin-bottom:18px;">
 	    <h2 style="margin:0 0 6px 0; font-size:18px; color:#1a1a1a;">Today</h2>
 	    <div style="color:#666; font-size:13px;">Copy and send the drafts below. Use tabs to focus on one owner.</div>
 	    {action_blocks}
 	  </div>
-	  {tracker_html}
-	  {how_it_works}
+	  <div id="section-pipeline">{tracker_html}</div>
 	  {owner_blocks}
 	  <div style="text-align:center; padding:20px 0; margin-top:30px; border-top:1px solid #ddd; color:#999; font-size:12px;">
 	    Auto-generated by Lightwork Follow-Up Tracker. Drafts are suggestions, tweak as needed.
 	  </div>
 	  <script>
 	  (function() {{
+	    var state = {{
+	      owner: 'ALL',
+	      transcript: 'all',
+	      no_show: 'all',
+	      overdue: 'all'
+	    }};
+
+	    function syncMenuSpacer() {{
+	      var menu = document.getElementById('lwMenu');
+	      var spacer = document.getElementById('lwMenuSpacer');
+	      if (menu && spacer) {{
+	        spacer.style.height = menu.offsetHeight + 'px';
+	      }}
+	    }}
+
+	    function applyVisibility() {{
+	      var visibleCards = 0;
+	      var visibleRows = 0;
+	      document.querySelectorAll('.lw-filter-item').forEach(function(el) {{
+	        var owner = el.getAttribute('data-owner') || 'Unassigned';
+	        var transcript = el.getAttribute('data-transcript') || 'no';
+	        var noShow = el.getAttribute('data-no-show') || '0';
+	        var overdue = el.getAttribute('data-overdue') || '0';
+
+	        var ownerMatch = state.owner === 'ALL' || owner === state.owner;
+	        var transcriptMatch = state.transcript === 'all' || transcript === state.transcript;
+	        var noShowMatch = state.no_show === 'all' || noShow === state.no_show;
+	        var overdueMatch = state.overdue === 'all' || overdue === state.overdue;
+
+	        var show = ownerMatch && transcriptMatch && noShowMatch && overdueMatch;
+	        el.classList.toggle('lw-hidden', !show);
+	        if (show && el.classList.contains('lw-lead-card')) visibleCards += 1;
+	        if (show && el.tagName === 'TR') visibleRows += 1;
+	      }});
+
+	      document.querySelectorAll('.lw-owner-scope').forEach(function(scope) {{
+	        var owner = scope.getAttribute('data-owner-scope') || 'Unassigned';
+	        scope.classList.toggle('lw-hidden', !(state.owner === 'ALL' || owner === state.owner));
+	      }});
+
+	      document.querySelectorAll('.lw-owner-group').forEach(function(group) {{
+	        var hasVisibleItems = !!group.querySelector('.lw-filter-item:not(.lw-hidden)');
+	        if (group.classList.contains('lw-owner-scope') && group.classList.contains('lw-hidden')) {{
+	          return;
+	        }}
+	        group.classList.toggle('lw-hidden', !hasVisibleItems);
+	      }});
+
+	      var count = document.getElementById('lwResultCount');
+	      if (count) {{
+	        count.textContent = 'Showing ' + visibleCards + ' draft card(s) and ' + visibleRows + ' table row(s).';
+	      }}
+	    }}
+
 	    function setActiveOwner(owner) {{
+	      state.owner = owner;
 	      document.querySelectorAll('.lw-tab').forEach(function(btn) {{
-	        btn.classList.toggle('active', btn.getAttribute('data-owner') === owner);
+	        var selected = btn.getAttribute('data-owner-tab') === owner;
+	        btn.classList.toggle('active', selected);
+	        btn.setAttribute('aria-selected', selected ? 'true' : 'false');
+	        btn.setAttribute('tabindex', selected ? '0' : '-1');
 	      }});
-	      document.querySelectorAll('[data-owner]').forEach(function(el) {{
-	        var o = el.getAttribute('data-owner');
-	        el.style.display = (owner === 'ALL' || o === owner) ? '' : 'none';
-	      }});
+	      applyVisibility();
 	    }}
 
 	    document.querySelectorAll('.lw-tab').forEach(function(btn) {{
 	      btn.addEventListener('click', function() {{
-	        setActiveOwner(btn.getAttribute('data-owner'));
+	        setActiveOwner(btn.getAttribute('data-owner-tab'));
+	      }});
+	      btn.addEventListener('keydown', function(ev) {{
+	        if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(ev.key)) return;
+	        ev.preventDefault();
+	        var tabs = Array.from(document.querySelectorAll('.lw-tab'));
+	        var idx = tabs.indexOf(btn);
+	        if (ev.key === 'ArrowRight') idx = (idx + 1) % tabs.length;
+	        if (ev.key === 'ArrowLeft') idx = (idx - 1 + tabs.length) % tabs.length;
+	        if (ev.key === 'Home') idx = 0;
+	        if (ev.key === 'End') idx = tabs.length - 1;
+	        tabs[idx].focus();
+	        setActiveOwner(tabs[idx].getAttribute('data-owner-tab'));
+	      }});
+	    }});
+
+	    document.querySelectorAll('.lw-filter-chip').forEach(function(chip) {{
+	      chip.addEventListener('click', function() {{
+	        var key = chip.getAttribute('data-filter-key');
+	        var val = chip.getAttribute('data-filter-value');
+	        state[key] = val;
+	        document.querySelectorAll('.lw-filter-chip[data-filter-key=\"' + key + '\"]').forEach(function(c) {{
+	          c.classList.toggle('active', c === chip);
+	        }});
+	        applyVisibility();
 	      }});
 	    }});
 
@@ -2244,24 +2532,8 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 	      }});
 	    }});
 
-	    var style = document.createElement('style');
-	    style.textContent = `
-	      .lw-tab {{
-	        border:1px solid #ddd;
-	        background:#fff;
-	        border-radius:999px;
-	        padding:6px 10px;
-	        font-size:12px;
-	        cursor:pointer;
-	      }}
-	      .lw-tab.active {{
-	        border-color:#2E5B88;
-	        background:#2E5B88;
-	        color:#fff;
-	      }}
-	    `;
-	    document.head.appendChild(style);
-
+	    window.addEventListener('resize', syncMenuSpacer);
+	    syncMenuSpacer();
 	    setActiveOwner('ALL');
 	  }})();
 	  </script>
@@ -2289,6 +2561,12 @@ def main():
         print("No Customer Leads with recent calls. Nothing to digest.")
         return
 
+    # Flag leads that had a canceled/no-show style meeting in the cadence window.
+    since = now - timedelta(days=CADENCE_LOOKBACK_DAYS)
+    no_show_lead_ids = get_no_show_lead_ids(since, now)
+    for lead_id, info in customer_leads.items():
+        info["no_show"] = lead_id in no_show_lead_ids
+
     # 2. Load Granola transcripts early so the tracker can show transcript status.
     # Prefer Granola MCP (authoritative transcripts), then fall back to Sheet/local cache.
     mcp_client = None
@@ -2301,7 +2579,6 @@ def main():
             print("\nConnecting to Granola MCP...")
             mcp_client = GranolaMCPClient(enable_interactive_login=True)
             mcp_client.initialize()
-            since = now - timedelta(days=CADENCE_LOOKBACK_DAYS)
             mcp_meetings = mcp_list_meetings(mcp_client, since, now)
             print(f"  {len(mcp_meetings)} meetings from MCP (last {CADENCE_LOOKBACK_DAYS} days)")
         except Exception as e:
@@ -2320,6 +2597,10 @@ def main():
 
     # Annotate each lead with transcript status for tracker view
     for lead_id, info in customer_leads.items():
+        if info.get("no_show"):
+            info["transcript_label"] = "No-show"
+            continue
+
         earliest_meeting = min(info["meetings"], key=lambda m: m.get("starts_at", ""))
 
         # MCP first
@@ -2378,6 +2659,7 @@ def main():
         fu_number = entry["next_fu"]
         fu_done = entry["fu_done"]
         days_overdue = entry["days_overdue"]
+        no_show = bool(entry.get("no_show"))
         first_call = entry["first_call_date"]
         days_since_call = (now - first_call).days
 
@@ -2401,9 +2683,13 @@ def main():
         # Match to Granola: MCP first, then Google Sheet, then local cache
         call_notes = ""
         transcript_present = False
+        if no_show:
+            print("  Meeting result: No-show")
+            call_notes = "NO-SHOW: Meeting was canceled or marked no-show."
+            transcript_present = True
 
         # MCP transcript
-        if mcp_client:
+        if (not no_show) and mcp_client:
             mid = entry.get("mcp_meeting_id")
             if mid:
                 transcript = mcp_transcripts.get(mid)
@@ -2418,7 +2704,7 @@ def main():
                     call_notes = "CALL TRANSCRIPT:\n" + transcript[:6000]
                     print("  Transcript: Granola MCP")
 
-        if sheet_rows:
+        if (not no_show) and sheet_rows:
             sheet_match = match_granola_sheet(earliest_meeting, sheet_rows)
             if sheet_match:
                 call_notes = extract_sheet_notes(sheet_match)
@@ -2428,7 +2714,7 @@ def main():
                 elif call_notes:
                     print(f"  Notes: Google Sheet match")
 
-        if not transcript_present and not call_notes and granola_docs:
+        if (not no_show) and (not transcript_present) and (not call_notes) and granola_docs:
             local_match = match_granola(earliest_meeting, granola_docs)
             if local_match:
                 call_notes = extract_granola_notes(local_match, granola_transcripts)
@@ -2438,7 +2724,7 @@ def main():
                 elif call_notes:
                     print(f"  Notes: Local cache match")
 
-        if not transcript_present:
+        if (not no_show) and (not transcript_present):
             print(f"  Transcript: None (will use Close.com data only)")
             missing_transcripts_count += 1
 
@@ -2455,6 +2741,7 @@ def main():
                     owner_name=owner,
                     fu_number=fu_number, sent_emails=sent_emails,
                     cadence_type=cadence_type,
+                    no_show=no_show,
                 )
             except Exception as e:
                 print(f"  Error from Claude: {e}")
@@ -2472,12 +2759,13 @@ def main():
             days_overdue=days_overdue,
             sent_emails=sent_emails,
             cadence_type=cadence_type,
+            no_show=no_show,
         )
         sections_by_owner.setdefault(owner, []).append(section)
 
         # Build compact action item for the top list (copy-friendly)
         parsed = _parse_ai_sections(claude_output)
-        copy_subject = f"Follow-up {fu_number}: {fu_type}"
+        copy_subject = f"No-show follow-up {fu_number}: {fu_type}" if no_show else f"Follow-up {fu_number}: {fu_type}"
         copy_body = (parsed.get("draft") or parsed.get("raw") or "").strip()
         action_items_by_owner.setdefault(owner, []).append(
             {
@@ -2485,8 +2773,11 @@ def main():
                 "close_url": lead_info.get("html_url", ""),
                 "fu_number": fu_number,
                 "transcript_label": transcript_label or ("Yes" if transcript_present else "No"),
+                "transcript_state": "yes" if transcript_present else "no",
                 "copy_draft": copy_body,
                 "copy_all": f"Subject: {copy_subject}\n\n{copy_body}".strip(),
+                "no_show": no_show,
+                "overdue": days_overdue > 0,
             }
         )
 
