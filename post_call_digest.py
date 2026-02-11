@@ -63,6 +63,15 @@ TEAM_EMAIL_TO_NAME = {
     "josh@lightworkhome.com": "Josh",
 }
 
+# Sender signatures by owner (used for draft sign-off).
+OWNER_SIGNATURE = {
+    "Jay": "Jay\nCo-founder | Lightwork Home Health",
+    "Johnny": "Johnny\nCo-founder | Lightwork Home Health",
+    "Dom": "Dom\nCo-founder | Lightwork Home Health",
+    "Josh": "Josh\nLightwork Home Health",
+    "Unassigned": "Jay\nCo-founder | Lightwork Home Health",
+}
+
 
 # 7-Touch Follow-Up Cadence
 # Key = FU number, Value = (day_offset, type_label, claude_instructions)
@@ -176,8 +185,10 @@ OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/res
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-codex")
 OPENAI_REASONING_EFFORT = (os.environ.get("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
 
-# Link policy: avoid hallucinated or random product links in outreach emails.
-# Allowlist can be overridden with a comma-separated list of URL prefixes.
+# Link policy: avoid hallucinated links in outreach emails.
+# Allowed set can be overridden via ALLOWED_URL_PREFIXES (comma-separated).
+# Otherwise, it is derived from known-good reference docs (sales scripts + examples).
+ALLOWED_URL_PREFIXES_ENV = os.environ.get("ALLOWED_URL_PREFIXES", "") or ""
 DEFAULT_ALLOWED_URL_PREFIXES = [
     "https://www.lightworkhome.com/examplereport",
     "http://www.lightworkhome.com/examplereport",
@@ -185,11 +196,6 @@ DEFAULT_ALLOWED_URL_PREFIXES = [
     "https://www.lightworkhome.com/blog-posts/the-science-behind-lightwork",
     "https://www.lightworkhome.com/reviews",
 ]
-ALLOWED_URL_PREFIXES = [
-    s.strip()
-    for s in (os.environ.get("ALLOWED_URL_PREFIXES", "") or "").split(",")
-    if s.strip()
-] or DEFAULT_ALLOWED_URL_PREFIXES
 
 # Message quality (anti "AI slop") and safety checks.
 FORBIDDEN_PHRASES = [
@@ -1423,8 +1429,8 @@ def load_reference_file(path):
         return ""
 
 
-def generate_digest_for_call(lead_info, call_notes, meeting, fu_number=1,
-                             sent_emails=None, cadence_type="active"):
+def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
+                             fu_number=1, sent_emails=None, cadence_type="active"):
     """Send lead context + call notes to Claude, get summary + follow-up draft.
 
     Args:
@@ -1489,7 +1495,10 @@ def generate_digest_for_call(lead_info, call_notes, meeting, fu_number=1,
         except Exception:
             days_since_call = None
 
-    prompt = f"""You are writing follow-up #{fu_number} of {max_touches} for Jay at Lightwork Home Health, an environmental health consulting company.
+    sender = owner_name if owner_name in OWNER_SIGNATURE else "Jay"
+    sender_signature = OWNER_SIGNATURE.get(sender, OWNER_SIGNATURE["Jay"])
+
+    prompt = f"""You are writing follow-up #{fu_number} of {max_touches} for {sender} at Lightwork Home Health, an environmental health consulting company.
 
 CADENCE TYPE: {cadence_label}
 {"This lead previously said they are not interested right now. This is a low-pressure, value-only nurture email. NO asks, NO scheduling mentions, NO pressure. Just share something genuinely useful." if cadence_type == "nurture" else ""}
@@ -1501,7 +1510,8 @@ EMAIL STRUCTURE (default):
 1) 1 line referencing something specific from the call
 2) 1 useful resource or actionable tip (ONLY if it matches what they discussed)
 3) Soft, optional next step (questions, or confirm they want to move forward)
-4) Short sign-off (Jay, Co-founder | Lightwork Home Health)
+4) Short sign-off using this exact signature:
+{sender_signature}
 
 SPECIFIC INSTRUCTIONS FOR THIS FOLLOW-UP:
 {fu_instructions}
@@ -1552,7 +1562,7 @@ IMPORTANT RULES:
 Generate exactly this output:
 
 FOLLOW-UP DRAFT:
-[Write a personalized follow-up email in Jay's voice matching the FU type instructions above. Short, casual, friendly, low pressure. Sign off as Jay, Co-founder | Lightwork Home Health]
+[Write a personalized follow-up email in {sender}'s voice matching the FU type instructions above. Short, casual, friendly, low pressure. Sign off using the exact signature above.]
 
 VALUE TIP REASONING:
 [If you included a health tip or resource, explain in 1 sentence why it's relevant to this lead. If none, write "No transcript match for a specific tip."]
@@ -2204,6 +2214,7 @@ def main():
             try:
                 claude_output = generate_digest_for_call(
                     lead_info, call_notes, earliest_meeting,
+                    owner_name=owner,
                     fu_number=fu_number, sent_emails=sent_emails,
                     cadence_type=cadence_type,
                 )
