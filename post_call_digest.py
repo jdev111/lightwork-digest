@@ -197,6 +197,55 @@ DEFAULT_ALLOWED_URL_PREFIXES = [
     "https://www.lightworkhome.com/reviews",
 ]
 
+
+def _extract_urls_for_allowlist(text: str) -> list:
+    import re
+    if not text:
+        return []
+    urls = re.findall(r"https?://[^\s<>()\"']+", text)
+    out = []
+    seen = set()
+    for u in urls:
+        u = u.strip()
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _build_allowed_url_prefixes() -> list:
+    # Priority 1: explicit env allowlist.
+    if ALLOWED_URL_PREFIXES_ENV.strip():
+        return [s.strip() for s in ALLOWED_URL_PREFIXES_ENV.split(",") if s.strip()]
+
+    # Priority 2: derive from known reference docs (plus defaults).
+    prefixes = []
+    seen = set()
+    for u in DEFAULT_ALLOWED_URL_PREFIXES:
+        if u not in seen:
+            seen.add(u)
+            prefixes.append(u)
+
+    ref_paths = [
+        SCRIPT_DIR / "reference" / "sales-scripts.md",
+        SCRIPT_DIR / "reference" / "follow-up-examples.md",
+        Path("/Users/dillandevram/Downloads/[MOST RECENT] [2509] Sales Scripts (1).md"),
+    ]
+    for p in ref_paths:
+        try:
+            txt = p.read_text()
+        except Exception:
+            continue
+        for u in _extract_urls_for_allowlist(txt):
+            if u not in seen:
+                seen.add(u)
+                prefixes.append(u)
+
+    return prefixes
+
+
+ALLOWED_URL_PREFIXES = _build_allowed_url_prefixes()
+
 # Message quality (anti "AI slop") and safety checks.
 FORBIDDEN_PHRASES = [
     "just checking in",
@@ -252,13 +301,25 @@ def _request(method, url, headers=None, body=None, basic_auth=None):
         req.add_header("Authorization", f"Basic {cred}")
 
     ctx = ssl.create_default_context()
-    try:
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode() if e.fp else ""
-        print(f"HTTP {e.code} for {url}: {error_body[:300]}")
-        raise
+    transient_codes = {408, 425, 429, 500, 502, 503, 504}
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode() if e.fp else ""
+            retryable = e.code in transient_codes
+            if retryable and attempt < max_attempts:
+                time.sleep(0.8 * attempt)
+                continue
+            print(f"HTTP {e.code} for {url}: {error_body[:300]}")
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError, ssl.SSLError):
+            if attempt < max_attempts:
+                time.sleep(0.8 * attempt)
+                continue
+            raise
 
 
 def _extract_urls(text: str) -> list:
@@ -1839,10 +1900,13 @@ def build_tracker_view(all_leads_status):
 
 
 def build_lead_section(lead_info, claude_output, granola_found,
+                       owner_name="Unassigned",
+                       transcript_label="",
                        fu_number=1, fu_done=0, days_since_call=0,
                        days_overdue=0, sent_emails=None, cadence_type="active"):
     """Build one lead's section for the digest email."""
     import html as html_mod
+    import json as json_mod
 
     custom = lead_info.get("custom", {})
     contacts = lead_info.get("contacts", [])
@@ -1918,12 +1982,12 @@ def build_lead_section(lead_info, claude_output, granola_found,
     reasoning_box = ""
     if reasoning:
         reasoning_box = f"""
-        <div style="border:1px solid #eee; border-radius:8px; padding:10px 12px; background:#fbfbfb; margin-bottom:10px;">
-          <div style="font-size:11px; letter-spacing:0.02em; text-transform:uppercase; color:#888; font-weight:700; margin-bottom:6px;">
+        <details style="border:1px solid #eee; border-radius:8px; padding:10px 12px; background:#fbfbfb; margin-bottom:10px;">
+          <summary style="cursor:pointer; font-size:11px; letter-spacing:0.02em; text-transform:uppercase; color:#888; font-weight:800;">
             Why This Tip/Resource
-          </div>
-          <div style="font-size:13px; color:#333; line-height:1.5; white-space:pre-wrap;">{html_mod.escape(reasoning)}</div>
-        </div>
+          </summary>
+          <div style="margin-top:8px; font-size:13px; color:#333; line-height:1.5; white-space:pre-wrap;">{html_mod.escape(reasoning)}</div>
+        </details>
         """
 
     priority_box = ""
@@ -1937,8 +2001,16 @@ def build_lead_section(lead_info, claude_output, granola_found,
         </div>
         """
 
+    # Copy helpers (browser preview only; email clients will ignore JS).
+    copy_subject = f"Follow-up {fu_number}: {fu_type}"
+    copy_body = (parsed["draft"] or parsed["raw"] or "").strip()
+    copy_all = f"Subject: {copy_subject}\n\n{copy_body}".strip()
+    transcript_chip = ""
+    if transcript_label:
+        transcript_chip = f'<span style="color:#666; font-size:12px; margin-left:10px;">Transcript: {html_mod.escape(transcript_label)}</span>'
+
     return f"""
-    <div style="border:1px solid {border_color}; border-radius:8px; padding:16px; margin-bottom:20px; background:#fff;">
+    <div data-owner="{html_mod.escape(owner_name)}" style="border:1px solid {border_color}; border-radius:8px; padding:16px; margin-bottom:20px; background:#fff;">
       <h3 style="margin:0 0 4px 0; color:#1a1a1a;">
         <a href="{close_url}" style="color:{accent_color}; text-decoration:none;">{name}</a>{location_str}{nurture_badge}{transcript_badge}{overdue_badge}
       </h3>
@@ -1948,6 +2020,15 @@ def build_lead_section(lead_info, claude_output, granola_found,
         <span style="color:#E67E22;">{fu_type}</span>
         <span style="color:#999; margin:0 4px;">|</span>
         {days_since_call}d since call
+        {transcript_chip}
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; margin:10px 0 8px 0;">
+        <button class="lw-copy-btn" data-copy-text={html_mod.escape(json_mod.dumps(copy_body))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
+          Copy draft
+        </button>
+        <button class="lw-copy-btn" data-copy-text={html_mod.escape(json_mod.dumps(copy_all))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
+          Copy subject + draft
+        </button>
       </div>
       <div style="margin-bottom:10px;">{progress_bar}</div>
       <div style="font-size:13px; color:#666; margin-bottom:12px;">
@@ -1970,12 +2051,23 @@ def build_lead_section(lead_info, claude_output, granola_found,
 
 
 def build_digest_html(sections_by_owner, date_str, total_leads,
-                      tracker_html=""):
+                      tracker_html="",
+                      action_items_by_owner=None,
+                      run_meta=None):
     """Build the full HTML digest email."""
+    import html as html_mod
+    import json as json_mod
+
+    if action_items_by_owner is None:
+        action_items_by_owner = {}
+    if run_meta is None:
+        run_meta = {}
+
+    # Collapsible: helpful, but shouldn't clutter the daily workflow.
     how_it_works = f"""
-    <div style="margin:0 0 28px 0; border:1px solid #ddd; border-radius:8px; padding:16px; background:#fff;">
-      <h2 style="margin:0 0 10px 0; font-size:18px; color:#1a1a1a;">How It Works</h2>
-      <p style="margin:0 0 14px 0; color:#666; font-size:13px; line-height:1.5;">
+    <details style="margin:0 0 28px 0; border:1px solid #ddd; border-radius:8px; padding:16px; background:#fff;">
+      <summary style="cursor:pointer; font-weight:800; font-size:18px; color:#1a1a1a;">How It Works</summary>
+      <p style="margin:10px 0 14px 0; color:#666; font-size:13px; line-height:1.5;">
         This digest keeps post-call follow-ups moving without guessing. It pulls the right leads, pulls transcripts, and generates value-driven drafts.
       </p>
 
@@ -2007,27 +2099,110 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
           </td>
         </tr>
       </table>
-    </div>
+    </details>
     """
+
+    owners = sorted(set(list(action_items_by_owner.keys()) + list(sections_by_owner.keys())))
+
+    # Compact action list at the top
+    action_blocks = ""
+    for owner in owners:
+        items = action_items_by_owner.get(owner, [])
+        if not items:
+            continue
+        rows = ""
+        for it in items:
+            rows += f"""
+            <tr style="border-bottom:1px solid #eee;">
+              <td style="padding:8px 10px; font-size:13px;">
+                <a href="{it.get('close_url','')}" style="color:#2E5B88; text-decoration:none;">{html_mod.escape(it.get('name',''))}</a>
+                <span style="color:#999; margin-left:6px; font-size:12px;">FU {it.get('fu_number')}</span>
+              </td>
+              <td style="padding:8px 6px; font-size:12px; text-align:center; color:#666;">{html_mod.escape(it.get('transcript_label',''))}</td>
+              <td style="padding:8px 6px; text-align:right; white-space:nowrap;">
+                <button class="lw-copy-btn" data-copy-text={html_mod.escape(json_mod.dumps(it.get('copy_draft','')))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer;">
+                  Copy
+                </button>
+                <button class="lw-copy-btn" data-copy-text={html_mod.escape(json_mod.dumps(it.get('copy_all','')))} style="border:1px solid #ddd; background:#fff; border-radius:6px; padding:6px 10px; font-size:12px; cursor:pointer; margin-left:6px;">
+                  Copy + Subject
+                </button>
+              </td>
+            </tr>
+            """
+
+        action_blocks += f"""
+        <div data-owner="{html_mod.escape(owner)}" style="margin-top:14px;">
+          <div style="font-size:12px; color:#888; font-weight:800; letter-spacing:0.02em; text-transform:uppercase; margin:0 0 6px 0;">
+            {html_mod.escape(owner)}: Action List
+          </div>
+          <table style="width:100%; border-collapse:collapse; background:#fff; border:1px solid #eee; border-radius:8px; overflow:hidden;">
+            <tr style="border-bottom:2px solid #ddd;">
+              <th style="padding:6px 10px; text-align:left; font-size:11px; color:#888; text-transform:uppercase;">Lead</th>
+              <th style="padding:6px 6px; text-align:center; font-size:11px; color:#888; text-transform:uppercase;">Transcript</th>
+              <th style="padding:6px 6px; text-align:right; font-size:11px; color:#888; text-transform:uppercase;">Copy</th>
+            </tr>
+            {rows}
+          </table>
+        </div>
+        """
 
     owner_blocks = ""
     for owner, sections in sections_by_owner.items():
         count = len(sections)
         owner_blocks += f"""
-    <div style="margin-top:28px;">
+    <div data-owner="{html_mod.escape(owner)}" style="margin-top:28px;">
       <h2 style="background:#2E5B88; color:white; padding:10px 16px; border-radius:6px; margin:0 0 16px 0; font-size:16px;">
         {owner.upper()}'S FOLLOW-UPS ({count})
       </h2>
       {"".join(sections)}
     </div>"""
 
+    # Owner tabs
+    tab_buttons = '<button class="lw-tab active" data-owner="ALL">All</button>'
+    for o in owners:
+        tab_buttons += f'<button class="lw-tab" data-owner="{html_mod.escape(o)}">{html_mod.escape(o)}</button>'
+
+    last_run = run_meta.get("last_run", "")
+    mcp_status = run_meta.get("mcp_status", "")
+    missing_transcripts = int(run_meta.get("missing_transcripts", 0) or 0)
+
+    banner = ""
+    if mcp_status:
+        banner = f"""
+        <div style="border:1px solid #f1c40f; background:#fff8db; color:#7a5b00; border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:13px;">
+          {html_mod.escape(mcp_status)}
+        </div>
+        """
+    elif missing_transcripts:
+        banner = f"""
+        <div style="border:1px solid #e67e22; background:#fff3e8; color:#8a4b12; border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:13px;">
+          {missing_transcripts} lead(s) are missing transcripts today.
+        </div>
+        """
+
     return f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
+	<html>
+	<head><meta charset="utf-8"></head>
 	<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; max-width:700px; margin:0 auto; padding:20px; background:#FFFCF0; color:#1a1a1a;">
-	  <div style="text-align:center; padding:16px 0; border-bottom:2px solid #2E5B88; margin-bottom:20px;">
-	    <h1 style="margin:0; font-size:22px; color:#1a1a1a;">Lightwork Follow-Up Digest</h1>
-	    <p style="margin:4px 0 0 0; color:#666; font-size:14px;">{date_str} &middot; {total_leads} lead{"s" if total_leads != 1 else ""} due for follow-up</p>
+	  <div style="position:sticky; top:0; background:#FFFCF0; padding:10px 0 12px 0; z-index:10; border-bottom:1px solid #e9e2c9; margin-bottom:14px;">
+	    <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:12px;">
+	      <div>
+	        <div style="font-size:20px; font-weight:800; color:#1a1a1a;">Lightwork Follow-Up Digest</div>
+	        <div style="margin-top:2px; color:#666; font-size:13px;">
+	          {date_str} &middot; {total_leads} lead{"s" if total_leads != 1 else ""} due
+	          {f"&middot; Last run: {html_mod.escape(last_run)}" if last_run else ""}
+	        </div>
+	      </div>
+	      <div class="lw-tabs" style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
+	        {tab_buttons}
+	      </div>
+	    </div>
+	  </div>
+	  {banner}
+	  <div style="margin-bottom:18px;">
+	    <h2 style="margin:0 0 6px 0; font-size:18px; color:#1a1a1a;">Today</h2>
+	    <div style="color:#666; font-size:13px;">Copy and send the drafts below. Use tabs to focus on one owner.</div>
+	    {action_blocks}
 	  </div>
 	  {tracker_html}
 	  {how_it_works}
@@ -2035,6 +2210,61 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 	  <div style="text-align:center; padding:20px 0; margin-top:30px; border-top:1px solid #ddd; color:#999; font-size:12px;">
 	    Auto-generated by Lightwork Follow-Up Tracker. Drafts are suggestions, tweak as needed.
 	  </div>
+	  <script>
+	  (function() {{
+	    function setActiveOwner(owner) {{
+	      document.querySelectorAll('.lw-tab').forEach(function(btn) {{
+	        btn.classList.toggle('active', btn.getAttribute('data-owner') === owner);
+	      }});
+	      document.querySelectorAll('[data-owner]').forEach(function(el) {{
+	        var o = el.getAttribute('data-owner');
+	        el.style.display = (owner === 'ALL' || o === owner) ? '' : 'none';
+	      }});
+	    }}
+
+	    document.querySelectorAll('.lw-tab').forEach(function(btn) {{
+	      btn.addEventListener('click', function() {{
+	        setActiveOwner(btn.getAttribute('data-owner'));
+	      }});
+	    }});
+
+	    document.querySelectorAll('.lw-copy-btn').forEach(function(btn) {{
+	      btn.addEventListener('click', async function() {{
+	        try {{
+	          var raw = btn.getAttribute('data-copy-text');
+	          var text = JSON.parse(raw);
+	          await navigator.clipboard.writeText(text);
+	          var prev = btn.textContent;
+	          btn.textContent = 'Copied';
+	          setTimeout(function() {{ btn.textContent = prev; }}, 900);
+	        }} catch (e) {{
+	          btn.textContent = 'Copy failed';
+	          setTimeout(function() {{ btn.textContent = 'Copy'; }}, 900);
+	        }}
+	      }});
+	    }});
+
+	    var style = document.createElement('style');
+	    style.textContent = `
+	      .lw-tab {{
+	        border:1px solid #ddd;
+	        background:#fff;
+	        border-radius:999px;
+	        padding:6px 10px;
+	        font-size:12px;
+	        cursor:pointer;
+	      }}
+	      .lw-tab.active {{
+	        border-color:#2E5B88;
+	        background:#2E5B88;
+	        color:#fff;
+	      }}
+	    `;
+	    document.head.appendChild(style);
+
+	    setActiveOwner('ALL');
+	  }})();
+	  </script>
 	</body>
 	</html>"""
 
@@ -2047,6 +2277,7 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 def main():
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%b %-d, %Y")
+    last_run_str = now.astimezone().strftime("%Y-%m-%d %H:%M")
 
     print(f"Lightwork Follow-Up Digest - {date_str}")
     print("=" * 60)
@@ -2063,6 +2294,7 @@ def main():
     mcp_client = None
     mcp_meetings = []
     mcp_transcripts = {}  # meeting_id -> transcript_text
+    mcp_status = ""
 
     if GRANOLA_MCP_ENABLE:
         try:
@@ -2075,6 +2307,9 @@ def main():
         except Exception as e:
             print(f"  Warning: Granola MCP unavailable: {e}")
             mcp_client = None
+            mcp_status = f"Granola MCP unavailable: {e}"
+    else:
+        mcp_status = ""
 
     print("\nLoading Granola transcripts (fallback sources)...")
     sheet_rows = load_granola_sheet()
@@ -2134,6 +2369,8 @@ def main():
 
     # 4. Process each due lead
     sections_by_owner = {}
+    action_items_by_owner = {}
+    missing_transcripts_count = 0
 
     for i, entry in enumerate(due_leads):
         lead_info = entry["lead_info"]
@@ -2203,6 +2440,7 @@ def main():
 
         if not transcript_present:
             print(f"  Transcript: None (will use Close.com data only)")
+            missing_transcripts_count += 1
 
         # Generate FU-specific draft with Claude
         sent_emails = entry.get("sent_emails", [])
@@ -2223,8 +2461,11 @@ def main():
                 claude_output = "(Error generating follow-up. Review this lead manually.)"
 
         # Build section
+        transcript_label = (customer_leads.get(entry["lead_id"], {}) or {}).get("transcript_label", "")
         section = build_lead_section(
             lead_info, claude_output, transcript_present,
+            owner_name=owner,
+            transcript_label=transcript_label,
             fu_number=fu_number,
             fu_done=fu_done,
             days_since_call=days_since_call,
@@ -2234,10 +2475,35 @@ def main():
         )
         sections_by_owner.setdefault(owner, []).append(section)
 
+        # Build compact action item for the top list (copy-friendly)
+        parsed = _parse_ai_sections(claude_output)
+        copy_subject = f"Follow-up {fu_number}: {fu_type}"
+        copy_body = (parsed.get("draft") or parsed.get("raw") or "").strip()
+        action_items_by_owner.setdefault(owner, []).append(
+            {
+                "name": lead_name,
+                "close_url": lead_info.get("html_url", ""),
+                "fu_number": fu_number,
+                "transcript_label": transcript_label or ("Yes" if transcript_present else "No"),
+                "copy_draft": copy_body,
+                "copy_all": f"Subject: {copy_subject}\n\n{copy_body}".strip(),
+            }
+        )
+
     # 6. Build digest HTML and save to file
     total_leads = sum(len(s) for s in sections_by_owner.values())
-    html = build_digest_html(sections_by_owner, date_str, total_leads,
-                             tracker_html=tracker_html)
+    html = build_digest_html(
+        sections_by_owner,
+        date_str,
+        total_leads,
+        tracker_html=tracker_html,
+        action_items_by_owner=action_items_by_owner,
+        run_meta={
+            "last_run": last_run_str,
+            "mcp_status": mcp_status,
+            "missing_transcripts": missing_transcripts_count,
+        },
+    )
 
     output_path = SCRIPT_DIR / "digest_preview.html"
     output_path.write_text(html)
