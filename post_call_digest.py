@@ -1633,6 +1633,58 @@ def mcp_list_meetings(client: "GranolaMCPClient", since_dt: datetime, until_dt: 
     return meetings
 
 
+def _load_local_granola_meetings() -> list:
+    """Load meetings from the local Granola cache file in the same format as mcp_list_meetings().
+
+    Returns list of {id, title, date_str, emails} dicts that can be passed to mcp_match_meeting().
+    """
+    cache_path = Path.home() / "Library" / "Application Support" / "Granola" / "cache-v3.json"
+    if not cache_path.exists():
+        return []
+    try:
+        with open(cache_path) as f:
+            raw = json.load(f)
+        state = json.loads(raw["cache"])["state"]
+    except Exception:
+        return []
+
+    docs = state.get("documents", {})
+    # Only include docs from the Lightwork Calls folder
+    lw_list_id = None
+    for list_id, meta in state.get("documentListsMetadata", {}).items():
+        if isinstance(meta, dict) and "lightwork" in (meta.get("title") or "").lower():
+            lw_list_id = list_id
+            break
+    if not lw_list_id:
+        return []
+
+    lw_doc_ids = set(state.get("documentLists", {}).get(lw_list_id, []))
+    meetings = []
+    for did in lw_doc_ids:
+        doc = docs.get(did, {})
+        if not doc:
+            continue
+        title = doc.get("title") or ""
+        created = doc.get("created_at") or ""
+        # Format date_str to match what mcp_match_meeting expects: "Feb 10, 2026 2:00 PM"
+        date_str = ""
+        if created:
+            try:
+                dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                date_str = dt.strftime("%b %d, %Y %I:%M %p")
+            except Exception:
+                pass
+        # Extract attendee emails from google_calendar_event
+        emails = set()
+        gcal = doc.get("google_calendar_event", {})
+        if isinstance(gcal, dict):
+            for att in gcal.get("attendees", []):
+                if isinstance(att, dict) and att.get("email"):
+                    emails.add(att["email"].lower())
+        meetings.append({"id": did, "title": title, "date_str": date_str, "emails": emails})
+    return meetings
+
+
 def mcp_match_meeting(close_meeting: dict, mcp_meetings: list) -> dict | None:
     """Match a Close meeting to a Granola MCP meeting list."""
     close_attendees, close_title, _ = _get_close_meeting_context(close_meeting)
@@ -3301,6 +3353,11 @@ def main():
     else:
         mcp_status = ""
 
+    # Load local Granola cache docs as matchable meetings (works without MCP)
+    local_granola_meetings = _load_local_granola_meetings()
+    if local_granola_meetings:
+        print(f"  {len(local_granola_meetings)} meetings from local Granola cache")
+
     print("\nLoading Granola transcripts (fallback sources)...")
     sheet_rows = load_granola_sheet()
     print(f"  {len(sheet_rows)} rows from Google Sheet")
@@ -3351,6 +3408,18 @@ def main():
                     continue
                 info["transcript_label"] = "No (MCP)"
                 continue
+
+        # Local Granola cache DB lookup (works without MCP API)
+        if local_granola_meetings:
+            m = mcp_match_meeting(earliest_meeting, local_granola_meetings)
+            if m:
+                mid = m["id"]
+                info["mcp_meeting_id"] = mid
+                cached = _get_cached_transcript(transcript_db, mid)
+                if cached is not None and cached["transcript_text"]:
+                    mcp_transcripts[mid] = cached["transcript_text"]
+                    info["transcript_label"] = "Yes (cached)"
+                    continue
 
         # Fallback: Sheet/local cache
         src, match_obj = get_granola_match(earliest_meeting, sheet_rows, granola_docs)
