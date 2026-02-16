@@ -5,9 +5,28 @@ Usage: python3 generate_7fu_demo.py
 Output: 7fu_demo.html (auto-opens in browser)
 """
 import html as html_mod
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+
+
+def _escape_preserving_links(text):
+    """HTML-escape text but preserve <a href="...">...</a> tags."""
+    # Extract links, escape everything else, then restore links
+    placeholder_map = {}
+    counter = 0
+    def _stash_link(m):
+        nonlocal counter
+        key = f"\x00LINK{counter}\x00"
+        placeholder_map[key] = m.group(0)
+        counter += 1
+        return key
+    stripped = re.sub(r'<a\s+href="[^"]*"[^>]*>.*?</a>', _stash_link, text, flags=re.DOTALL)
+    escaped = html_mod.escape(stripped)
+    for key, original in placeholder_map.items():
+        escaped = escaped.replace(html_mod.escape(key), original)
+    return escaped
 from pathlib import Path
 
 # Import everything from the main script
@@ -188,7 +207,7 @@ for d in drafts:
       </h3>
       <div style="background:#f9f9f9; border-left:3px solid #2E5B88; padding:14px; margin-top:10px;
                   white-space:pre-wrap; font-family:sans-serif; font-size:14px; line-height:1.7; color:#333;">
-{html_mod.escape(d['draft'])}</div>
+{_escape_preserving_links(d['draft'])}</div>
       {reasoning_html}
     </div>"""
 
