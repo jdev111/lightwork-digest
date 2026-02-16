@@ -2218,7 +2218,13 @@ IMPORTANT RULES:
     if no_show:
         no_show_note = "\nThis lead was a no-show or canceled. Write a short, calm no-show follow-up: acknowledge the missed connection in one line, offer a simple path to reschedule, and include one useful takeaway/resource without pressure. Do not pretend a conversation already happened."
 
-    user_prompt = f"""CADENCE TYPE: {message_mode}{nurture_note}{no_show_note}
+    # Skip Wilkinson content for leads referred by Andrew Wilkinson
+    referral_note = ""
+    source_lower = source.lower() if source else ""
+    if "wilkinson" in source_lower or "andrew" in source_lower:
+        referral_note = "\nIMPORTANT: This lead was referred by Andrew Wilkinson. Do NOT include the Wilkinson write-up, Wilkinson blog post, Wilkinson testimonial, or any Andrew Wilkinson reference. They already know him and have likely read it. Use a different resource instead."
+
+    user_prompt = f"""CADENCE TYPE: {message_mode}{nurture_note}{no_show_note}{referral_note}
 
 THIS IS FOLLOW-UP #{fu_number} ({fu_type})
 Scheduled for Day {day_offset} after the call.

@@ -152,3 +152,31 @@ Multiple leads were affected (not just Romeo). After the fix:
 - Jonathan Cronstedt: FU 1 -> FU 4
 - Ryan Moran: FU 1 -> FU 2
 - Eduardo Serrano: FU 1 -> FU 2
+
+---
+
+## Feature: Skip Wilkinson write-up for Andrew Wilkinson referrals
+
+### Problem
+When a lead's referral source is Andrew Wilkinson, the system may include the Wilkinson write-up (https://www.lightworkhome.com/blog-posts/wilkinson) or his testimonial in the follow-up email. These leads already know Andrew and likely already read the write-up, so including it adds no value.
+
+### Where the Wilkinson content appears
+1. **FU1 cadence template** (line ~116): hardcoded Wilkinson write-up link
+2. **FU3 cadence template** (line ~157): Wilkinson testimonial quote
+3. **Claude system prompt** (line ~2190): Wilkinson write-up listed as a key resource
+4. **Sales scripts reference file**: Wilkinson social proof section
+5. **Voice guide reference file**: Wilkinson testimonial and link
+
+### How
+1. In `generate_digest_for_call()` (line ~2090), check the `source` field for "wilkinson" or "andrew" (case-insensitive)
+2. If matched, add a line to the Claude prompt: "IMPORTANT: This lead was referred by Andrew Wilkinson. Do NOT include the Wilkinson write-up, Wilkinson testimonial, or any Andrew Wilkinson reference. They already know him. Use a different resource."
+3. Also modify the FU1 and FU3 cadence instructions: when the referral source matches, swap in alternative instructions that skip the Wilkinson content
+
+### Where to change
+- `post_call_digest.py`, function `generate_digest_for_call()` (~line 2090)
+- Add the referral check after `source` is read (line ~2112)
+- Inject the exclusion note into the Claude prompt (line ~2247 area)
+
+### Verification
+1. Run `python3 post_call_digest.py --debug-lead "LEAD_NAME"` for a known Wilkinson referral
+2. Check that the generated draft does not mention Wilkinson, his write-up, or his testimonial
