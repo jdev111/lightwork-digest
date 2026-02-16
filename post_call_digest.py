@@ -19,12 +19,15 @@ Each lead gets a tailored email matching their position in the cadence:
 No external packages required - stdlib only.
 """
 
+import argparse
 import csv
 import html as html_mod
 import io
 import json
 import os
 import re
+import smtplib
+import sqlite3
 import ssl
 import subprocess
 import time
@@ -38,6 +41,8 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -82,32 +87,80 @@ OWNER_SIGNATURE = {
 # 7-Touch Follow-Up Cadence
 # Key = FU number, Value = (day_offset, type_label, claude_instructions)
 CADENCE = {
-    1: (1, "Post-call value",
-        "Personalized tip from transcript. Reference specific things discussed on the call. "
-        "If there's a relevant topic from the sales scripts (EMFs, air quality, mold, sleep, etc.), "
-        "include one actionable tip with product links. Keep it short and natural. "
-        "Do not assume an on-site visit is booked; keep next steps optional unless the transcript explicitly confirms a date."),
-    2: (3, "Second value drop",
-        "Different topic from FU1 OR share the example report with context. "
-        "100% value, zero ask. Do NOT repeat the same tip from FU1. "
-        "If sharing the report, explain what they'll find relevant based on their situation."),
-    3: (6, "Social proof + value",
-        "Share the Wilkinson write-up (https://www.lightworkhome.com/blog-posts/wilkinson) or a relevant testimonial. "
-        "Include one more quick tip on a different topic. Frame the social proof naturally."),
-    4: (10, "Educational content",
-        "Share a relevant newsletter article or the science video "
-        "(https://www.lightworkhome.com/blog-posts/the-science-behind-lightwork). "
-        "Write the key takeaway into the email so they get value without clicking."),
-    5: (16, "New angle + soft ask",
-        "Share new content or a different angle on their situation. "
-        "First soft mention of continuing the conversation, e.g. 'happy to chat more if helpful.' "
-        "Still primarily value-driven."),
-    6: (25, "Availability + value",
-        "Final resource share. Mention specific upcoming availability in their city if known. "
-        "Frame as 'we'll be in [city] on [dates]' if applicable."),
-    7: (35, "Graceful close",
-        "No pressure. 'We're here whenever you're ready.' One last useful resource. "
-        "Make it clear this is the last follow-up but leave the door open warmly."),
+    1: (1, "Post-call recap + tip",
+        "Use this template, inserting a personalized tip from the sales scripts based on the call:\n\n"
+        "Hey {first_name},\n\n"
+        "Pleasure speaking with you today! Thanks for reaching out.\n\n"
+        "A couple followup items: here's an <a href=\"https://www.lightworkhome.com/examplereport\">example report</a> "
+        "(password: homehealth), and attached is the deck I presented with additional information.\n\n"
+        "Also, since you mentioned {topic from call}, one thing worth noting: {one specific actionable tip "
+        "from the sales scripts that matches what they discussed}.\n\n"
+        "Let me know if you'd like to move forward. And feel free to reach out if you have any questions, "
+        "on what I've sent or more generally on home health!\n\n"
+        "Best,\n{sender_name}\n\nCo-founder | Lightwork Home Health\n\n"
+        "If no relevant topic came up on the call, omit the tip paragraph entirely."),
+    2: (3, "Social proof",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "Hope you're doing well! Just wanted to check if you'd like to move forward.\n\n"
+        "Also wanted to share this recent write-up that "
+        "<a href=\"https://x.com/awilkinson\">Andrew Wilkinson</a> (co-founder of Tiny) "
+        "did on our service. I thought you might find it interesting. "
+        "Here's <a href=\"https://www.lightworkhome.com/blog-posts/wilkinson\">the link.</a>\n\n"
+        "Let me know if you have any questions.\n\n"
+        "Best,\n{sender_name}\n\nCo-founder | Lightwork Home Health"),
+    3: (6, "Key findings",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "I wanted to share a few examples of problems we've found in recent home assessments.\n\n"
+        "We identified several critical issues that many homeowners aren't aware of:\n\n"
+        "- Hidden mold contamination despite multiple previous professional tests which gave the 'all clear.' "
+        "We advised on a specialist manual inspection and coordinated next steps with our recommended inspector for the area.\n"
+        "- Elevated trihalomethanes in shower water (which we continue to see in many homes we test). "
+        "These can be vaporized in hot shower water and have carcinogenic risks from inhalation and dermal absorption. "
+        "We recommended filtration designed to address these specific contaminants.\n"
+        "- Significant indoor particulate matter, especially at the ultrafine size, which can penetrate deep into the lungs. "
+        "We advised on an optimal filtration strategy as well as a VOC removal strategy to address exposure from recent furnishings.\n"
+        "- Significant AC electrical fields impacting all bedrooms, including children's rooms. "
+        "We advised on the tradeoffs between kill switches, shielding paint, and other solutions.\n\n"
+        "This is why our clients trust us. Our assessments uncover hidden risks and provide clear, "
+        "actionable solutions tailored to each home. Shall we schedule a follow-up to go over any questions?\n\n"
+        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
+    4: (10, "Testimonials",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "Just wanted to share a few words from our clients and clinical partners:\n\n"
+        "\"We regularly refer our patients to Lightwork Home Health because holistic care requires addressing "
+        "the home environment. The science is clear: environmental factors have a major impact on health.\" "
+        "- Dr. Robert Kachko, Director of Integrative Health, Atria Institute\n\n"
+        "\"Lightwork's home health assessment was incredibly detailed and insightful. I actively recommend their "
+        "service to all my patients who want a healthier home and lower environmental toxin exposure.\" "
+        "- Dr. David Boyd MD, Concierge Medicine Physician & Founder, Blindspot Medical\n\n"
+        "\"Incredible service. After living in a house that nearly killed me, these guys were literally lifesavers.\" "
+        "- Chris Williamson, Host of Modern Wisdom podcast\n\n"
+        "\"Lightwork's home health audit was next level. They went deep into our lighting, air, water, EMFs, and more. "
+        "We sleep easier knowing our home's health and having fixed the key issues.\" "
+        "- Daymond John, Shark Tank Investor\n\n"
+        "\"My experience with Lightwork was exceptional. Their team is incredibly knowledgeable and responsive. "
+        "What stood out most was their actionable guidance. The results were immediate: I breathe easier, sleep better, "
+        "and enjoy greater confidence in my home's health.\" - Matthew Wadiak, Founder of Blue Apron\n\n"
+        "\"I genuinely thought I was doing everything right. But Lightwork found serious issues I never would have "
+        "discovered on my own. They were incredibly thorough, tested every aspect of my home that could be impacting "
+        "my family's health, and then helped us get everything resolved. We made the changes right away. Highly recommend.\" "
+        "- Andrew Wilkinson, Co-founder of Tiny\n\n"
+        "Let me know if you have any questions or would like to move forward.\n\n"
+        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
+    5: (16, "Availability",
+        "Mention upcoming availability in their area. Create gentle urgency. "
+        "2-3 sentences. No tip."),
+    6: (25, "Graceful close",
+        "Last active email. 2 sentences max. 'Just wanted to leave the door open. "
+        "We're here whenever you're ready.' Do NOT include a resource or tip. Just be human."),
+    7: (90, "3-month check-in",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "How's it been going with home health? Let me know if you have any questions or anything.\n\n"
+        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
 }
 
 # Long-term nurture cadence for "Lost" leads (said not interested now).
@@ -149,13 +202,14 @@ MATCH_THRESHOLD = 5  # minimum score to consider a transcript match valid
 # Transcript/prompt size caps
 TRANSCRIPT_CAP_SHEET = 6000
 TRANSCRIPT_CAP_LOCAL = 4000
-SALES_SCRIPTS_CAP = 3000
-FOLLOWUP_EXAMPLES_CAP = 2000
-SENT_EMAIL_BODY_CAP = 500
+SENT_EMAIL_BODY_CAP = 1000
+
+# Anthropic model (easy to swap back to haiku if needed)
+ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 
 # Network
 HTTP_TIMEOUT_SECONDS = 30
-RETRY_BACKOFF_FACTOR = 0.8
+RETRY_BACKOFF_FACTOR = 5
 OAUTH_TIMEOUT_SECONDS = 180
 
 
@@ -197,6 +251,18 @@ GRANOLA_MCP_TOKEN_PATH = Path(
     )
 )
 GRANOLA_MCP_ENABLE = os.environ.get("GRANOLA_MCP_ENABLE", "").strip() == "1"
+
+# SMTP (Gmail) for sending follow-up reminders to team members
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+
+# Map owner name -> email for sending reminders (inverse of TEAM_EMAIL_TO_NAME)
+OWNER_TO_EMAIL = {v: k for k, v in TEAM_EMAIL_TO_NAME.items()}
+
+# SQLite draft cache
+DRAFT_DB_PATH = SCRIPT_DIR / "drafts.db"
 
 # AI provider
 # - anthropic: existing behavior (default)
@@ -249,6 +315,8 @@ def _build_allowed_url_prefixes() -> list:
     ref_paths = [
         SCRIPT_DIR / "reference" / "sales-scripts.md",
         SCRIPT_DIR / "reference" / "follow-up-examples.md",
+        SCRIPT_DIR / "reference" / "sales-tips-condensed.md",
+        SCRIPT_DIR / "reference" / "voice-guide-condensed.md",
         Path("/Users/dillandevram/Downloads/[MOST RECENT] [2509] Sales Scripts (1).md"),
     ]
     for p in ref_paths:
@@ -286,8 +354,8 @@ FORBIDDEN_TONE_MARKERS = [
 
 MAX_EXCLAMATIONS = 1
 # These are soft caps; if exceeded we rewrite to be tighter.
-MAX_SENTENCES_BY_FU = {1: 6, 2: 5, 3: 7, 4: 6, 5: 6, 6: 6, 7: 6}
-MAX_WORDS_BY_FU = {1: 140, 2: 120, 3: 170, 4: 140, 5: 150, 6: 160, 7: 150}
+MAX_SENTENCES_BY_FU = {1: 8, 2: 6, 3: 15, 4: 20, 5: 4, 6: 3, 7: 3}
+MAX_WORDS_BY_FU = {1: 170, 2: 120, 3: 300, 4: 400, 5: 80, 6: 60, 7: 40}
 
 # ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
@@ -314,15 +382,18 @@ def _request(method, url, headers=None, body=None, basic_auth=None):
         body = json.dumps(body).encode()
         headers.setdefault("Content-Type", "application/json")
 
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    auth_header = None
     if basic_auth:
         cred = base64.b64encode(f"{basic_auth[0]}:{basic_auth[1]}".encode()).decode()
-        req.add_header("Authorization", f"Basic {cred}")
+        auth_header = f"Basic {cred}"
 
     ctx = ssl.create_default_context()
-    transient_codes = {408, 425, 429, 500, 502, 503, 504}
+    transient_codes = {400, 408, 425, 429, 500, 502, 503, 504}
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
+        req = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
+        if auth_header:
+            req.add_header("Authorization", auth_header)
         try:
             with urllib.request.urlopen(req, context=ctx, timeout=HTTP_TIMEOUT_SECONDS) as resp:
                 return json.loads(resp.read().decode())
@@ -371,7 +442,7 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", text or ""))
 
 
-def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None) -> list:
+def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None, prior_emails: list | None = None) -> list:
     issues = []
     d = (draft or "").strip()
     dl = d.lower()
@@ -415,6 +486,28 @@ def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None) -
     # Em dashes (U+2014) are forbidden per style guide
     if "\u2014" in d:
         issues.append("Contains em dash(es). Replace with commas, periods, or semicolons.")
+
+    # Duplicate resources: flag URLs/resources already sent in prior emails
+    if prior_emails:
+        prior_urls = set()
+        prior_text_lower = ""
+        for em in prior_emails:
+            body = (em.get("body") or "")
+            prior_urls.update(u.lower().rstrip("/") for u in _extract_urls(body))
+            prior_text_lower += " " + body.lower()
+        draft_urls = _extract_urls(d)
+        for u in draft_urls:
+            if u.lower().rstrip("/") in prior_urls:
+                issues.append(f"Duplicate resource already sent in a prior email: {u}")
+        # Also check for named resources mentioned by keyword in prior emails
+        named_resources = {
+            "wilkinson": "Wilkinson write-up",
+            "examplereport": "example report",
+            "the-science-behind-lightwork": "science video",
+        }
+        for keyword, label in named_resources.items():
+            if keyword in dl and keyword in prior_text_lower:
+                issues.append(f'Duplicate resource: "{label}" was already shared in a prior email. Use a different resource.')
 
     return issues
 
@@ -836,9 +929,17 @@ def get_recent_customer_leads(all_meetings=None):
     meetings = get_meetings_in_range(since, all_meetings=all_meetings)
     print(f"  Found {len(meetings)} completed meetings")
 
+    # Also fetch no-show meetings so leads with only no-shows are included
+    no_show_meetings = _filter_meetings_in_range(
+        all_meetings if all_meetings is not None else _fetch_all_meetings(since, now),
+        since, now, NO_SHOW_STATUSES
+    )
+    print(f"  Found {len(no_show_meetings)} no-show/canceled meetings")
+    all_relevant = meetings + no_show_meetings
+
     # Group by lead_id, track earliest meeting
     leads = {}  # lead_id -> {meetings, earliest_start, owner_id}
-    for m in meetings:
+    for m in all_relevant:
         lead_id = m.get("lead_id", "")
         if not lead_id:
             continue
@@ -969,26 +1070,28 @@ def get_close_users():
     return mapping
 
 
-def get_followup_history(lead_id, first_call_date):
-    """Get distinct follow-up threads sent to a lead after first_call_date.
+def get_followup_history(lead_id, first_call_date, debug=False):
+    """Count follow-ups sent to a lead after first_call_date.
 
-    A follow-up = a unique outgoing email thread (grouped by subject, ignoring
-    Re:/Fwd: prefixes). Multiple replies in the same thread count as ONE
-    follow-up, not multiple.
+    A follow-up = a distinct outgoing email on a unique calendar day within
+    a thread. Multiple emails on the same day in the same thread (e.g.
+    Close.com quoted-reply artifacts) count as ONE follow-up. Emails on
+    different days, even in the same thread, count as separate follow-ups.
 
-    Returns (thread_count, thread_summaries) where:
-      - thread_count: number of distinct outgoing email threads
-      - thread_summaries: list of dicts with subject/body for the latest
-        email in each thread (for Claude context)
+    Returns (fu_count, email_summaries) where:
+      - fu_count: number of distinct follow-ups (unique thread+day combos)
+      - email_summaries: list of dicts with subject/body for the latest
+        email per day per thread, sorted by date (for Claude context)
     """
     after_str = first_call_date.strftime("%Y-%m-%dT%H:%M:%S+00:00")
     has_more = True
     skip = 0
 
-    # Fetch follow-up emails after first call date, group by thread.
-    # threads dict: normalized_subject -> {subject, body, date}
-    # Keeps the latest email per thread (most relevant context for Claude).
+    # Group by thread (normalized subject), then by calendar day within each
+    # thread. Keep the latest email per day per thread.
+    # threads: normalized_subject -> {day_str -> {subject, body, date}}
     threads = {}
+    all_outgoing = []
     while has_more:
         data = close_get(
             "/activity/email/",
@@ -1003,22 +1106,64 @@ def get_followup_history(lead_id, first_call_date):
         for e in emails:
             if e.get("direction") == "outgoing":
                 subject = (e.get("subject") or "(no subject)").strip()
-                if "assessment" in subject.lower():
+                if debug:
+                    all_outgoing.append((e.get("date_created", ""), subject))
+                subj_lower = subject.lower()
+                email_date = e.get("date_created", "")
+                email_day = email_date[:10]
+                call_day = first_call_date.strftime("%Y-%m-%d")
+                # Skip assessment emails always
+                if "assessment" in subj_lower:
+                    if debug:
+                        print(f"    [SKIP] {subject} (contains 'assessment')")
+                    continue
+                # Skip scheduling/booking thread emails entirely.
+                # These are cal.com auto-generated threads for setting up the
+                # meeting. Even if a follow-up is later sent in this thread,
+                # it should use a fresh subject line to count properly.
+                is_scheduling_thread = any(
+                    p in subj_lower for p in (
+                        "test call between", "testing call between",
+                        "partner call between", "intro call between",
+                    )
+                )
+                if is_scheduling_thread:
+                    if debug:
+                        print(f"    [SKIP] {subject} (scheduling thread)")
                     continue
                 norm = _normalize_subject(subject)
-                email_date = e.get("date_created", "")
-                # Keep the latest email per thread (overwrite if newer)
-                existing = threads.get(norm)
+                day_key = email_date[:10]  # "2026-01-21"
+                if norm not in threads:
+                    threads[norm] = {}
+                existing = threads[norm].get(day_key)
                 if existing is None or email_date > existing.get("date", ""):
                     body = (e.get("body_text") or e.get("body_text_quoted") or "").strip()
                     if len(body) > SENT_EMAIL_BODY_CAP:
                         body = body[:SENT_EMAIL_BODY_CAP] + "..."
-                    threads[norm] = {"subject": subject, "body": body, "date": email_date}
+                    threads[norm][day_key] = {"subject": subject, "body": body, "date": email_date}
         has_more = data.get("has_more", False)
         skip += len(emails)
 
-    thread_list = list(threads.values())
-    return len(thread_list), thread_list
+    # Count: total distinct days across all threads
+    fu_count = sum(len(days) for days in threads.values())
+
+    # Flatten all day-latest emails, sorted by date (for Claude context)
+    all_emails = []
+    for days in threads.values():
+        all_emails.extend(days.values())
+    all_emails.sort(key=lambda x: x["date"])
+
+    if debug:
+        print(f"    First call date: {first_call_date.strftime('%Y-%m-%d')}")
+        print(f"    Total outgoing emails after first call: {len(all_outgoing)}")
+        for date, subj in sorted(all_outgoing):
+            print(f"      {date[:10]} | {subj[:80]}")
+        print(f"    Threads: {len(threads)}, Distinct follow-ups (thread+day): {fu_count}")
+        for norm, days in threads.items():
+            for day, t in sorted(days.items()):
+                print(f"      [{norm[:40]}] {day} -> {t['subject'][:50]}")
+
+    return fu_count, all_emails
 
 
 def _normalize_subject(subject):
@@ -1033,7 +1178,7 @@ def _normalize_subject(subject):
     return s.lower()
 
 
-def get_leads_due_today(customer_leads):
+def get_leads_due_today(customer_leads, debug_lead_name=""):
     """Check follow-up status for all customer leads.
 
     Returns:
@@ -1059,7 +1204,10 @@ def get_leads_due_today(customer_leads):
         max_touches = len(cadence)
         label = "nurture" if cadence_type == "nurture" else "FU"
 
-        fu_done, sent_emails = get_followup_history(lead_id, first_call)
+        debug = bool(debug_lead_name and debug_lead_name.lower() in lead_name.lower())
+        if debug:
+            print(f"\n  === DEBUG: {lead_name} ===")
+        fu_done, sent_emails = get_followup_history(lead_id, first_call, debug=debug)
         next_fu = fu_done + 1
 
         # Calculate due date and overdue status
@@ -1563,11 +1711,183 @@ def _parse_ai_sections(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# SQLite draft cache
+# ---------------------------------------------------------------------------
+
+
+def _init_draft_db():
+    """Create the drafts table if it doesn't exist, return a connection."""
+    conn = sqlite3.connect(DRAFT_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS drafts (
+            lead_id TEXT,
+            fu_number INTEGER,
+            cadence_type TEXT,
+            draft_text TEXT,
+            reasoning TEXT,
+            priority TEXT,
+            input_hash TEXT,
+            created_at TEXT,
+            PRIMARY KEY (lead_id, fu_number, cadence_type)
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def _draft_input_hash(call_notes, prior_emails_text, fu_instructions):
+    """SHA-256 hash of draft inputs so we regenerate when context changes."""
+    blob = f"{call_notes}|{prior_emails_text}|{fu_instructions}"
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _get_cached_draft(conn, lead_id, fu_number, cadence_type, input_hash):
+    """Return cached draft dict or None if miss/stale."""
+    row = conn.execute(
+        "SELECT draft_text, reasoning, priority, input_hash FROM drafts "
+        "WHERE lead_id = ? AND fu_number = ? AND cadence_type = ?",
+        (lead_id, fu_number, cadence_type),
+    ).fetchone()
+    if row is None:
+        return None
+    if row[3] != input_hash:
+        return None  # inputs changed, regenerate
+    return {"draft_text": row[0], "reasoning": row[1], "priority": row[2]}
+
+
+def _save_draft(conn, lead_id, fu_number, cadence_type, raw_output, input_hash):
+    """Upsert a draft into the cache."""
+    parsed = _parse_ai_sections(raw_output)
+    conn.execute(
+        "INSERT OR REPLACE INTO drafts "
+        "(lead_id, fu_number, cadence_type, draft_text, reasoning, priority, input_hash, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            lead_id, fu_number, cadence_type,
+            parsed.get("draft") or parsed.get("raw") or raw_output,
+            (parsed.get("reasoning") or "").strip(),
+            (parsed.get("priority") or "").strip(),
+            input_hash,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# SMTP email reminders
+# ---------------------------------------------------------------------------
+
+
+def _send_owner_reminders(action_items_by_owner, date_str):
+    """Send one reminder email per owner with all their leads' drafts.
+
+    Skips gracefully if SMTP credentials are not configured.
+    """
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        print("\n  SMTP credentials not set (SMTP_EMAIL / SMTP_PASSWORD in .env). Skipping email delivery.")
+        return
+
+    for owner, items in action_items_by_owner.items():
+        if not items:
+            continue
+        recipient = OWNER_TO_EMAIL.get(owner)
+        if not recipient:
+            print(f"  No email address for owner '{owner}', skipping reminder.")
+            continue
+
+        lead_count = len(items)
+        subject = f"Lightwork Follow-Ups - {date_str} ({lead_count} lead{'s' if lead_count != 1 else ''})"
+
+        # Build HTML body
+        leads_html = ""
+        for item in items:
+            name = html_mod.escape(item.get("name", ""))
+            fu = item.get("fu_number", "?")
+            draft = html_mod.escape(item.get("copy_draft", ""))
+            no_show_badge = ' <span style="color:#c0392b;">[NO-SHOW]</span>' if item.get("no_show") else ""
+            overdue_badge = ' <span style="color:#E67E22;">[OVERDUE]</span>' if item.get("overdue") else ""
+
+            # Call summary bullets (extract from call_notes)
+            call_summary_html = ""
+            call_notes_raw = item.get("call_notes", "")
+            if call_notes_raw and call_notes_raw != "NO-SHOW: Meeting was canceled or marked no-show.":
+                # Take first ~800 chars of notes, split into bullet-worthy lines
+                notes_text = call_notes_raw[:800]
+                # Strip headers like "MEETING NOTES:" and "CALL TRANSCRIPT:"
+                notes_text = re.sub(r"^(MEETING NOTES|CALL TRANSCRIPT|CALL NOTES FROM GRANOLA):?\s*", "", notes_text, flags=re.MULTILINE)
+                # Split into meaningful lines and take top 5
+                lines = [l.strip() for l in notes_text.split("\n") if l.strip() and len(l.strip()) > 10]
+                bullets = lines[:5]
+                if bullets:
+                    bullet_items = "".join(f"<li>{html_mod.escape(b[:150])}</li>" for b in bullets)
+                    call_summary_html = f"""
+                    <div style="margin-top:12px; border-top:1px solid #eee; padding-top:10px;">
+                      <div style="font-size:11px; text-transform:uppercase; color:#888; font-weight:700; margin-bottom:6px;">Call Summary</div>
+                      <ul style="margin:0; padding-left:20px; font-size:13px; color:#555; line-height:1.6;">{bullet_items}</ul>
+                    </div>"""
+
+            # Prior emails sent
+            prior_emails_html = ""
+            sent_emails = item.get("sent_emails") or []
+            if sent_emails:
+                email_items = ""
+                for idx, em in enumerate(sent_emails, 1):
+                    subj = html_mod.escape(em.get("subject", "(no subject)"))
+                    body = html_mod.escape((em.get("body") or "")[:300])
+                    if len(em.get("body", "")) > 300:
+                        body += "..."
+                    email_items += f"""
+                    <div style="border-left:2px solid #ddd; padding:6px 10px; margin-bottom:6px; background:#fafafa;">
+                      <div style="font-size:12px; font-weight:600; color:#2E5B88;">Email {idx}: {subj}</div>
+                      <div style="font-size:12px; color:#666; white-space:pre-wrap; margin-top:4px;">{body}</div>
+                    </div>"""
+                prior_emails_html = f"""
+                <div style="margin-top:12px; border-top:1px solid #eee; padding-top:10px;">
+                  <div style="font-size:11px; text-transform:uppercase; color:#888; font-weight:700; margin-bottom:6px;">Prior Emails ({len(sent_emails)})</div>
+                  {email_items}
+                </div>"""
+
+            leads_html += f"""
+            <div style="border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px; background:#fff;">
+              <h3 style="margin:0 0 8px 0; color:#2E5B88;">{name} (FU #{fu}){no_show_badge}{overdue_badge}</h3>
+              <div style="background:#f9f9f9; border-left:3px solid #2E5B88; padding:12px; white-space:pre-wrap; font-family:sans-serif; font-size:14px; line-height:1.6; color:#333;">{draft}</div>
+              {call_summary_html}
+              {prior_emails_html}
+            </div>"""
+
+        body_html = f"""
+        <html><body style="font-family:sans-serif; max-width:700px; margin:0 auto; padding:20px;">
+          <h2 style="color:#1a1a1a;">Follow-Up Reminders for {html_mod.escape(owner)}</h2>
+          <p style="color:#666; font-size:14px;">{date_str} - {lead_count} lead{'s' if lead_count != 1 else ''} due</p>
+          {leads_html}
+          <p style="color:#999; font-size:12px; margin-top:24px;">Generated by Lightwork Follow-Up Tracker</p>
+        </body></html>"""
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_EMAIL
+        msg["To"] = recipient
+        msg.attach(MIMEText(body_html, "html"))
+
+        try:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                server.send_message(msg)
+            print(f"  Reminder sent to {owner} ({recipient}): {lead_count} lead{'s' if lead_count != 1 else ''}")
+        except Exception as e:
+            print(f"  Error sending to {owner} ({recipient}): {e}")
+
+
+# ---------------------------------------------------------------------------
 # Claude API
 # ---------------------------------------------------------------------------
 
 SALES_SCRIPTS_PATH = SCRIPT_DIR / "reference" / "sales-scripts.md"
 FOLLOWUP_EXAMPLES_PATH = SCRIPT_DIR / "reference" / "follow-up-examples.md"
+SALES_TIPS_CONDENSED_PATH = SCRIPT_DIR / "reference" / "sales-tips-condensed.md"
+VOICE_GUIDE_CONDENSED_PATH = SCRIPT_DIR / "reference" / "voice-guide-condensed.md"
 
 
 def load_reference_file(path):
@@ -1578,10 +1898,48 @@ def load_reference_file(path):
         return ""
 
 
+def _load_condensed_or_fallback(condensed_path, raw_path, fallback_cap=3000):
+    """Load condensed reference file if it exists, else truncate the raw file."""
+    condensed = load_reference_file(condensed_path)
+    if condensed:
+        return condensed
+    raw = load_reference_file(raw_path)
+    if len(raw) > fallback_cap:
+        return raw[:fallback_cap] + "\n[...truncated]"
+    return raw
+
+
+def _extract_first_name(display_name):
+    """Extract first name from Close.com display name.
+
+    Handles: "John Smith" -> "John"
+             "John & Sarah Smith" -> "John"
+             "The Smiths" -> "The Smiths" (no change if no clear first name)
+    """
+    name = (display_name or "").strip()
+    if not name:
+        return name
+    # Handle "John & Sarah Smith" or "John and Sarah Smith"
+    parts = re.split(r"\s*[&]\s*|\s+and\s+", name, maxsplit=1)
+    first_part = parts[0].strip()
+    # Take the first word as the first name
+    words = first_part.split()
+    if not words:
+        return name
+    candidate = words[0]
+    # Skip titles/articles that aren't real first names
+    if candidate.lower() in ("the", "mr", "mrs", "ms", "dr", "mr.", "mrs.", "ms.", "dr."):
+        return name
+    return candidate
+
+
 def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
                              fu_number=1, sent_emails=None, cadence_type="active",
                              no_show=False, sales_scripts=None, followup_examples=None):
     """Send lead context + call notes to Claude, get summary + follow-up draft.
+
+    Uses a system prompt for stable context (voice, rules, reference material)
+    and a user message for per-lead context (name, transcript, prior emails).
 
     Args:
         lead_info: Lead details from Close.com
@@ -1597,6 +1955,7 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
     addresses = lead_info.get("addresses", [])
 
     lead_name = lead_info.get("display_name", "Unknown")
+    first_name = _extract_first_name(lead_name)
     lead_email = ""
     if contacts:
         emails = contacts[0].get("emails", [])
@@ -1614,10 +1973,15 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
     why_reaching_out = custom.get("Why are you reaching out", "N/A")
     meeting_status = custom.get("Meeting Status", "N/A")
 
+    # Load condensed reference files (fall back to raw + truncation if missing)
     if sales_scripts is None:
-        sales_scripts = load_reference_file(SALES_SCRIPTS_PATH)
+        sales_scripts = _load_condensed_or_fallback(
+            SALES_TIPS_CONDENSED_PATH, SALES_SCRIPTS_PATH, fallback_cap=3000
+        )
     if followup_examples is None:
-        followup_examples = load_reference_file(FOLLOWUP_EXAMPLES_PATH)
+        followup_examples = _load_condensed_or_fallback(
+            VOICE_GUIDE_CONDENSED_PATH, FOLLOWUP_EXAMPLES_PATH, fallback_cap=2000
+        )
 
     # Get cadence details for this FU number
     cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
@@ -1652,33 +2016,89 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
     sender = owner_name if owner_name in OWNER_SIGNATURE else "Jay"
     sender_signature = OWNER_SIGNATURE.get(sender, OWNER_SIGNATURE["Jay"])
 
-    prompt = f"""You are writing follow-up #{fu_number} of {max_touches} for {sender} at Lightwork Home Health, an environmental health consulting company.
+    # Days-since-call context for the prompt
+    days_since_text = ""
+    if days_since_call is not None:
+        days_since_text = f"Actual days since call: {days_since_call}."
+        overdue_days = days_since_call - day_offset
+        if overdue_days > 3:
+            days_since_text += f" This follow-up is overdue by {overdue_days} days, so avoid language like 'the other day' or 'recently'."
 
-CADENCE TYPE: {message_mode}
-{"This lead previously said they are not interested right now. This is a low-pressure, value-only nurture email. NO asks, NO scheduling mentions, NO pressure. Just share something genuinely useful." if cadence_type == "nurture" else ""}
-{"This lead was a no-show or canceled. Write a short, calm no-show follow-up: acknowledge the missed connection in one line, offer a simple path to reschedule, and include one useful takeaway/resource without pressure. The Andrew Wilkinson write-up is allowed when relevant." if no_show else ""}
+    # ---------------------------------------------------------------
+    # System prompt: stable per-run context (voice, rules, references)
+    # ---------------------------------------------------------------
+    system_prompt = f"""You write follow-up emails for {sender} at Lightwork Home Health, an environmental health consulting company.
+
+VOICE & STYLE (match this exactly):
+{followup_examples}
+
+SALES TIPS (reference ONLY when a transcript topic matches a trigger below):
+{sales_scripts}
+
+FULL {max_touches}-TOUCH CADENCE:
+{cadence_overview}
+
+SERVICE AREA:
+Lightwork travels to the client. Based on the lead's city:
+- If in the US: we serve the entire US
+- If in Canada: we serve Canada
+- If in Europe: we serve Europe
+When mentioning availability (FU6), frame it as "we'll be in [their city/area]" to confirm we come to them.
+
+KEY RESOURCES YOU CAN REFERENCE:
+- Example report: https://www.lightworkhome.com/examplereport (password: homehealth)
+- Wilkinson write-up: https://www.lightworkhome.com/blog-posts/wilkinson
+- Science video: https://www.lightworkhome.com/blog-posts/the-science-behind-lightwork
+
+ALLOWED LINK PREFIXES (only include links that start with one of these):
+{", ".join(ALLOWED_URL_PREFIXES)}
+
+IMPORTANT RULES:
+- BREVITY IS KING. Most emails should be 2-4 sentences. Only FU1 can be longer (up to 6 sentences).
+- Do NOT force a tip or resource into every email. If the cadence step says "no tip," write a clean, short follow-up without one.
+- Never say "home health assessment" or "assessment."
+- When mentioning the example report, always hyperlink it: <a href="https://www.lightworkhome.com/examplereport">example report</a> (password: homehealth)
+- Do NOT imply anything is scheduled or confirmed unless the transcript explicitly confirms it.
+- Do NOT use "today" or "yesterday" unless the call was within the last 2 days.
+- No generic filler ("just checking in", "circling back", "touching base").
+- Do NOT use "thought you might find this interesting/helpful" or similar filler openers (unless it's part of a fixed template). Vary your openers.
+- Never use em dashes.
+- Do NOT repeat ANY resource or talking point from prior emails.
+- Vary your openings. Not every email should start "Hey {{name}}, [reference to call]."
+- Use the lead's first name ("{first_name}") in the greeting, not their full name.
+- LINKS: Only use links from the allowlist above."""
+
+    # ---------------------------------------------------------------
+    # User message: per-lead context
+    # ---------------------------------------------------------------
+    nurture_note = ""
+    if cadence_type == "nurture":
+        nurture_note = "\nThis lead previously said they are not interested right now. This is a low-pressure, value-only nurture email. NO asks, NO scheduling mentions, NO pressure. Just share something genuinely useful."
+    no_show_note = ""
+    if no_show:
+        no_show_note = "\nThis lead was a no-show or canceled. Write a short, calm no-show follow-up: acknowledge the missed connection in one line, offer a simple path to reschedule, and include one useful takeaway/resource without pressure. Do not pretend a conversation already happened."
+
+    user_prompt = f"""CADENCE TYPE: {message_mode}{nurture_note}{no_show_note}
 
 THIS IS FOLLOW-UP #{fu_number} ({fu_type})
-Day {day_offset} after the initial call.
+Scheduled for Day {day_offset} after the call.
+{days_since_text}
 
-EMAIL STRUCTURE (default):
-1) {"1 line acknowledging the missed call briefly and politely" if no_show else "1 line referencing something specific from the call"}
-2) 1 useful resource or actionable tip (ONLY if it matches what they discussed)
-3) {"Simple reschedule option with no pressure" if no_show else "Soft, optional next step (questions, or confirm they want to move forward)"}
-4) Short sign-off using this exact signature:
-{sender_signature}
+{"NO-SHOW NOTE: This lead missed the call. Acknowledge it briefly, offer to reschedule, no pressure." if no_show else ""}
 
 SPECIFIC INSTRUCTIONS FOR THIS FOLLOW-UP:
 {fu_instructions}
 
-FULL {max_touches}-TOUCH CADENCE (for context on where this fits):
-{cadence_overview}
+EMAIL FORMAT:
+Write a short, natural follow-up email. Match the cadence step instructions above.
+Sign off with this exact signature:
+{sender_signature}
 
 EMAILS ALREADY SENT TO THIS LEAD (do NOT repeat any tips, resources, or talking points from these):
 {prior_emails_text}
 
 LEAD CONTEXT:
-- Name: {lead_name}
+- Name: {lead_name} (use "{first_name}" in greeting)
 - Email: {lead_email}
 - City: {city}
 - Budget: {budget}
@@ -1691,48 +2111,26 @@ LEAD CONTEXT:
 CALL NOTES FROM GRANOLA:
 {call_notes if call_notes else "(No transcript available - generate follow-up based on lead context only)"}
 
-SALES SCRIPTS (reference these ONLY if a specific topic from the transcript matches):
-{sales_scripts[:SALES_SCRIPTS_CAP] if sales_scripts else "(Not available)"}
-
-FOLLOW-UP EMAIL EXAMPLES (match this voice exactly):
-{followup_examples[:FOLLOWUP_EXAMPLES_CAP] if followup_examples else "(Not available)"}
-
-KEY RESOURCES YOU CAN REFERENCE:
-- Example report: https://www.lightworkhome.com/examplereport (password: homehealth)
-- Wilkinson write-up: https://www.lightworkhome.com/blog-posts/wilkinson
-- Science video: https://www.lightworkhome.com/blog-posts/the-science-behind-lightwork
-
-IMPORTANT RULES:
-- Never say "home health assessment" or "assessment." Just reference the service naturally.
-- When mentioning the example report, always hyperlink it: <a href="https://www.lightworkhome.com/examplereport">example report</a> (password: homehealth)
-- Only include a value-driven health tip if the transcript explicitly mentions a related topic (e.g., they talked about sleep, EMFs, air quality, mold, baby monitors, etc.). If there's no transcript or the transcript doesn't touch a topic from the sales scripts, do NOT force a tip. Just write a clean follow-up without one.
-- Do NOT imply anything is scheduled or confirmed (no "looking forward to our visit", no specific dates) unless the transcript explicitly confirms it. Use optional next-step language instead (e.g., "If you'd like, we can...").
-- Do NOT use "today" or "yesterday" unless the call was actually within the last 2 days.
-- Do NOT use generic sales-email filler ("just checking in", "circling back", "touching base").
-- {"Because this is a no-show follow-up: do not pretend a conversation already happened. No references to details that were supposedly discussed unless they exist in transcript notes." if no_show else "Avoid assumptions that weren't clearly discussed."}
-- LINKS: Only include links from this allowlist. Otherwise, do not include a link.
-  Allowed prefixes: {", ".join(ALLOWED_URL_PREFIXES)}
-- Never use em dashes.
-- This is follow-up #{fu_number}. Do NOT repeat tips or resources from earlier follow-ups. Provide fresh value.
-
 Generate exactly this output:
 
 FOLLOW-UP DRAFT:
-[Write a personalized follow-up email in {sender}'s voice matching the FU type instructions above. Short, casual, friendly, low pressure. Sign off using the exact signature above.]
+[Write a personalized follow-up email. Short, casual, friendly, low pressure. Sign off using the exact signature above.]
 
 VALUE TIP REASONING:
 [If you included a health tip or resource, explain in 1 sentence why it's relevant to this lead. If none, write "No transcript match for a specific tip."]
 
 PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
 
-    def _call_model(p: str) -> str:
+    def _call_model(sys_prompt: str, usr_prompt: str) -> str:
         if AI_PROVIDER == "openai":
             if not OPENAI_API_KEY:
                 raise RuntimeError("OPENAI_API_KEY missing (required for AI_PROVIDER=openai)")
 
+            # OpenAI Responses API: prepend system context to the input
+            combined = f"{sys_prompt}\n\n---\n\n{usr_prompt}"
             body = {
                 "model": OPENAI_MODEL,
-                "input": p,
+                "input": combined,
                 "reasoning": {"effort": OPENAI_REASONING_EFFORT},
             }
             resp = _request(
@@ -1772,9 +2170,10 @@ PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
             raise RuntimeError("ANTHROPIC_API_KEY missing (required for AI_PROVIDER=anthropic)")
 
         body = {
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": p}],
+            "model": ANTHROPIC_MODEL,
+            "max_tokens": 2048,
+            "system": sys_prompt,
+            "messages": [{"role": "user", "content": usr_prompt}],
         }
 
         resp = _request(
@@ -1793,28 +2192,28 @@ PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
         text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
         return "\n".join(text_parts).strip()
 
-    raw = _call_model(prompt)
+    raw = _call_model(system_prompt, user_prompt)
     # Post-check and rewrite loop (avoid link hallucinations, em dashes, AI slop).
     max_rewrites = 3
     for attempt in range(max_rewrites):
         parsed = _parse_ai_sections(raw)
         draft = parsed.get("draft") or parsed.get("raw") or ""
-        issues = _lint_email_draft(draft, int(fu_number), days_since_call)
+        issues = _lint_email_draft(draft, int(fu_number), days_since_call, prior_emails=sent_emails)
         if not issues:
             return raw
 
-        fix_prompt = (
-            prompt
+        fix_user = (
+            user_prompt
             + "\n\nCOMPLIANCE FIXES REQUIRED:\n"
             + "\n".join(f"- {i}" for i in issues)
             + "\n\nRewrite the email to fix the issues. Keep it short, specific, and human."
         )
-        raw = _call_model(fix_prompt)
+        raw = _call_model(system_prompt, fix_user)
 
     # Log if issues persist after all rewrite attempts
     remaining = _lint_email_draft(
         (_parse_ai_sections(raw).get("draft") or raw or "").strip(),
-        int(fu_number), days_since_call,
+        int(fu_number), days_since_call, prior_emails=sent_emails,
     )
     if remaining:
         print(f"  Warning: draft still has issues after {max_rewrites} rewrites: {remaining}")
@@ -1934,10 +2333,12 @@ def build_tracker_view(all_leads_status):
                 next_due = f'<span style="color:#888; font-size:11px;">{fu_type}</span>'
 
             name_link = f'<a href="{close_url}" style="color:#2E5B88; text-decoration:none;">{name}</a>' if close_url else name
+            call_date_str = first_call.strftime("%b %-d")
 
             rows_html += f"""
             <tr class="lw-filter-item" data-owner="{html_mod.escape(owner)}" data-transcript="{transcript_state}" data-no-show={"1" if no_show else "0"} data-overdue={"1" if entry.get("days_overdue", 0) > 0 else "0"} style="border-bottom:1px solid #eee;">
               <td style="padding:8px 10px; font-size:13px;">{name_link}{nurture_badge}{no_show_badge}</td>
+              <td style="padding:8px 6px; font-size:12px; text-align:center; color:#666;">{call_date_str}</td>
               <td style="padding:8px 6px; font-size:12px; text-align:center; color:#666;">{transcript_label}</td>
               <td style="padding:8px 6px; font-size:13px; text-align:center;">{fu_done}/{max_touches}</td>
               <td style="padding:8px 6px;">{dots}</td>
@@ -1954,6 +2355,7 @@ def build_tracker_view(all_leads_status):
           <table style="width:100%; border-collapse:collapse;">
             <tr style="border-bottom:2px solid #ddd;">
               <th style="padding:6px 10px; text-align:left; font-size:11px; color:#888; text-transform:uppercase;">Lead</th>
+              <th style="padding:6px 6px; text-align:center; font-size:11px; color:#888; text-transform:uppercase;">Call</th>
               <th style="padding:6px 6px; text-align:center; font-size:11px; color:#888; text-transform:uppercase;">Transcript</th>
               <th style="padding:6px 6px; text-align:center; font-size:11px; color:#888; text-transform:uppercase;">FU</th>
               <th style="padding:6px 6px; text-align:left; font-size:11px; color:#888; text-transform:uppercase;">Progress</th>
@@ -2541,6 +2943,12 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Lightwork Follow-Up Digest")
+    parser.add_argument("--fresh", action="store_true", help="Ignore draft cache, regenerate all")
+    parser.add_argument("--no-email", action="store_true", help="Skip sending reminder emails")
+    parser.add_argument("--debug-lead", type=str, default="", help="Print detailed email history for a lead (by name substring)")
+    args = parser.parse_args()
+
     # Validate required env vars early
     if not CLOSE_API_KEY:
         print("Error: CLOSE_API_KEY not set. Add it to .env or export it.")
@@ -2551,6 +2959,9 @@ def main():
     if not SKIP_CLAUDE and AI_PROVIDER == "openai" and not OPENAI_API_KEY:
         print("Error: OPENAI_API_KEY not set. Add it to .env or set SKIP_CLAUDE=1.")
         return
+
+    # Initialize draft cache
+    draft_db = _init_draft_db()
 
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%b %-d, %Y")
@@ -2571,10 +2982,27 @@ def main():
         print("No Customer Leads with recent calls. Nothing to digest.")
         return
 
-    # Flag leads that had a canceled/no-show style meeting in the cadence window.
-    no_show_lead_ids = get_no_show_lead_ids(since, now, all_meetings=all_raw_meetings)
+    # Flag leads whose MOST RECENT meeting was a no-show/canceled.
+    # (A lead with both a completed call and a later canceled reschedule
+    #  should only be flagged if the canceled one is the latest.)
+    no_show_meetings = _filter_meetings_in_range(all_raw_meetings, since, now, NO_SHOW_STATUSES)
+    no_show_by_lead = {}  # lead_id -> latest no-show start time
+    for m in no_show_meetings:
+        lid = m.get("lead_id", "")
+        if not lid:
+            continue
+        starts = m.get("starts_at", "")
+        if starts > no_show_by_lead.get(lid, ""):
+            no_show_by_lead[lid] = starts
+
     for lead_id, info in customer_leads.items():
-        info["no_show"] = lead_id in no_show_lead_ids
+        # Only flag as no-show if the latest no-show meeting is more recent
+        # than the latest completed meeting for this lead.
+        latest_completed = max(
+            (m.get("starts_at", "") for m in info["meetings"]), default=""
+        )
+        latest_no_show = no_show_by_lead.get(lead_id, "")
+        info["no_show"] = bool(latest_no_show and latest_no_show > latest_completed)
 
     # 2. Load Granola transcripts early so the tracker can show transcript status.
     # Prefer Granola MCP (authoritative transcripts), then fall back to Sheet/local cache.
@@ -2635,7 +3063,7 @@ def main():
 
     # 3. Determine which leads need follow-up today
     print(f"\nChecking follow-up status for {len(customer_leads)} leads...")
-    due_leads, all_leads_status = get_leads_due_today(customer_leads)
+    due_leads, all_leads_status = get_leads_due_today(customer_leads, debug_lead_name=args.debug_lead)
 
     # Build tracker view (always, even if no leads due today)
     tracker_html = build_tracker_view(all_leads_status)
@@ -2658,8 +3086,12 @@ def main():
 
     # 4. Process each due lead
     # Load reference files once for all leads
-    cached_sales_scripts = load_reference_file(SALES_SCRIPTS_PATH)
-    cached_followup_examples = load_reference_file(FOLLOWUP_EXAMPLES_PATH)
+    cached_sales_scripts = _load_condensed_or_fallback(
+        SALES_TIPS_CONDENSED_PATH, SALES_SCRIPTS_PATH, fallback_cap=3000
+    )
+    cached_followup_examples = _load_condensed_or_fallback(
+        VOICE_GUIDE_CONDENSED_PATH, FOLLOWUP_EXAMPLES_PATH, fallback_cap=2000
+    )
 
     sections_by_owner = {}
     action_items_by_owner = {}
@@ -2740,13 +3172,46 @@ def main():
             print(f"  Transcript: None (will use Close.com data only)")
             missing_transcripts_count += 1
 
-        # Generate FU-specific draft with Claude
+        # Generate FU-specific draft with Claude (or use cached version)
         sent_emails = entry.get("sent_emails", [])
+        lead_id = entry["lead_id"]
+        cadence_obj = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
+        _, _, fu_instr = cadence_obj[fu_number]
+        prior_text = "\n".join(f"{e['subject']}\n{e['body']}" for e in sent_emails) if sent_emails else ""
+        input_hash = _draft_input_hash(call_notes, prior_text, fu_instr)
+
         if SKIP_CLAUDE:
             print("  SKIP_CLAUDE=1 set; skipping Claude generation")
             claude_output = "(Skipped Claude generation; set SKIP_CLAUDE=0 to enable.)"
+        elif not args.fresh:
+            cached = _get_cached_draft(draft_db, lead_id, fu_number, cadence_type, input_hash)
+            if cached:
+                print(f"  Using cached draft (FU #{fu_number})")
+                # Reconstruct the raw output format from cached fields
+                parts = [f"FOLLOW-UP DRAFT:\n{cached['draft_text']}"]
+                if cached.get("reasoning"):
+                    parts.append(f"VALUE TIP REASONING:\n{cached['reasoning']}")
+                if cached.get("priority"):
+                    parts.append(f"PRIORITY: {cached['priority']}")
+                claude_output = "\n\n".join(parts)
+            else:
+                print(f"  Generating FU #{fu_number} draft ({len(sent_emails)} prior emails for context)...")
+                try:
+                    claude_output = generate_digest_for_call(
+                        lead_info, call_notes, earliest_meeting,
+                        owner_name=owner,
+                        fu_number=fu_number, sent_emails=sent_emails,
+                        cadence_type=cadence_type,
+                        no_show=no_show,
+                        sales_scripts=cached_sales_scripts,
+                        followup_examples=cached_followup_examples,
+                    )
+                    _save_draft(draft_db, lead_id, fu_number, cadence_type, claude_output, input_hash)
+                except Exception as e:
+                    print(f"  Error from Claude: {e}")
+                    claude_output = "(Error generating follow-up. Review this lead manually.)"
         else:
-            print(f"  Generating FU #{fu_number} draft ({len(sent_emails)} prior emails for context)...")
+            print(f"  Generating FU #{fu_number} draft --fresh ({len(sent_emails)} prior emails for context)...")
             try:
                 claude_output = generate_digest_for_call(
                     lead_info, call_notes, earliest_meeting,
@@ -2757,6 +3222,7 @@ def main():
                     sales_scripts=cached_sales_scripts,
                     followup_examples=cached_followup_examples,
                 )
+                _save_draft(draft_db, lead_id, fu_number, cadence_type, claude_output, input_hash)
             except Exception as e:
                 print(f"  Error from Claude: {e}")
                 claude_output = "(Error generating follow-up. Review this lead manually.)"
@@ -2792,6 +3258,8 @@ def main():
                 "copy_all": f"Subject: {copy_subject}\n\n{copy_body}".strip(),
                 "no_show": no_show,
                 "overdue": days_overdue > 0,
+                "sent_emails": sent_emails,
+                "call_notes": call_notes,
             }
         )
 
@@ -2818,6 +3286,14 @@ def main():
 
     # Auto-open in browser
     subprocess.run(["open", str(output_path)])
+
+    # Send email reminders to each team member
+    if not args.no_email and action_items_by_owner:
+        print("\nSending follow-up reminders...")
+        _send_owner_reminders(action_items_by_owner, date_str)
+
+    # Close draft cache
+    draft_db.close()
 
 
 if __name__ == "__main__":
