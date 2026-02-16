@@ -1,0 +1,25 @@
+name: Daily Follow-Up Digest
+
+on:
+  schedule:
+    # 9:00 AM EST = 14:00 UTC (winter) / 13:00 UTC (summer)
+    - cron: '0 14 * * 1-5'  # Weekdays only at 2pm UTC (9am EST)
+  workflow_dispatch: {}  # Allow manual trigger from GitHub UI
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run digest and send emails
+        env:
+          CLOSE_API_KEY: ${{ secrets.CLOSE_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: python3 post_call_digest.py --no-open

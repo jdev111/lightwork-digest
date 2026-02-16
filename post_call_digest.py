@@ -1685,9 +1685,10 @@ def mcp_get_transcript_text(client: "GranolaMCPClient", meeting_id: str) -> str:
     text = _mcp_text_content(res).strip()
     is_error = (res or {}).get("isError", False)
 
-    # Detect rate limit: either the isError flag is set with rate limit text,
-    # or the response text itself mentions rate limit
-    if is_error or (text and "rate limit" in text.lower()):
+    # Detect rate limit: check for "rate limit" in the response text
+    # (isError alone is not enough since it could be a different error like "not found")
+    is_rate_limit = text and "rate limit" in text.lower()
+    if is_rate_limit:
         raise GranolaRateLimitError(f"Rate limited fetching transcript for {meeting_id}: {text[:200]}")
 
     if not text:
@@ -1854,10 +1855,20 @@ def _save_transcript(conn, meeting_id, transcript_text="", meeting_notes="", sou
 # ---------------------------------------------------------------------------
 
 
+# SAFETY: Only these addresses can receive reminder emails. Never send
+# to leads, prospects, or any address outside this allowlist.
+ALLOWED_RECIPIENT_EMAILS = {
+    "jay@lightworkhome.com",
+    "johnny@lightworkhome.com",
+    "dom@lightworkhome.com",
+}
+
+
 def _send_owner_reminders(action_items_by_owner, date_str):
     """Send one reminder email per owner with all their leads' drafts.
 
     Skips gracefully if SMTP credentials are not configured.
+    SAFETY: Only sends to addresses in ALLOWED_RECIPIENT_EMAILS.
     """
     if not SMTP_EMAIL or not SMTP_PASSWORD:
         print("\n  SMTP credentials not set (SMTP_EMAIL / SMTP_PASSWORD in .env). Skipping email delivery.")
@@ -1869,6 +1880,9 @@ def _send_owner_reminders(action_items_by_owner, date_str):
         recipient = OWNER_TO_EMAIL.get(owner)
         if not recipient:
             print(f"  No email address for owner '{owner}', skipping reminder.")
+            continue
+        if recipient not in ALLOWED_RECIPIENT_EMAILS:
+            print(f"  BLOCKED: {recipient} is not in the allowed recipient list. Skipping.")
             continue
 
         lead_count = len(items)
@@ -3197,6 +3211,7 @@ def main():
     parser = argparse.ArgumentParser(description="Lightwork Follow-Up Digest")
     parser.add_argument("--fresh", action="store_true", help="Ignore draft cache, regenerate all")
     parser.add_argument("--no-email", action="store_true", help="Skip sending reminder emails")
+    parser.add_argument("--no-open", action="store_true", help="Don't open browser (for CI/server use)")
     parser.add_argument("--debug-lead", type=str, default="", help="Print detailed email history for a lead (by name substring)")
     parser.add_argument("--sync-transcripts", action="store_true",
                         help="Bulk-pull missing transcripts from Granola MCP into local DB, then exit")
@@ -3354,7 +3369,8 @@ def main():
         output_path = SCRIPT_DIR / "digest_preview.html"
         output_path.write_text(html)
         print(f"\nNo follow-ups due today. Tracker saved to {output_path}")
-        subprocess.run(["open", str(output_path)])
+        if not args.no_open:
+            subprocess.run(["open", str(output_path)])
         return
 
     total_due = len(due_leads)
@@ -3590,8 +3606,9 @@ def main():
     print(f"Digest saved to {output_path}")
     print(f"{total_leads} lead{'s' if total_leads != 1 else ''} due for follow-up")
 
-    # Auto-open in browser
-    subprocess.run(["open", str(output_path)])
+    # Auto-open in browser (skip in CI)
+    if not args.no_open:
+        subprocess.run(["open", str(output_path)])
 
     # Send email reminders to each team member (merge completed + no-show)
     all_action_items = {}
