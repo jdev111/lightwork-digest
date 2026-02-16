@@ -46,6 +46,16 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class GranolaRateLimitError(Exception):
+    """Raised when Granola MCP returns a rate limit error."""
+    pass
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -126,16 +136,13 @@ CADENCE = {
         "This is why our clients trust us. Our assessments uncover hidden risks and provide clear, "
         "actionable solutions tailored to each home. Shall we schedule a follow-up to go over any questions?\n\n"
         "{sender_name}\n\nCo-founder | Lightwork Home Health"),
-    4: (10, "Testimonials",
+    4: (10, "Availability + Reviews",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
-        "Just wanted to share a few words from our clients and clinical partners:\n\n"
-        "\"We regularly refer our patients to Lightwork Home Health because holistic care requires addressing "
-        "the home environment. The science is clear: environmental factors have a major impact on health.\" "
-        "- Dr. Robert Kachko, Director of Integrative Health, Atria Institute\n\n"
-        "\"Lightwork's home health assessment was incredibly detailed and insightful. I actively recommend their "
-        "service to all my patients who want a healthier home and lower environmental toxin exposure.\" "
-        "- Dr. David Boyd MD, Concierge Medicine Physician & Founder, Blindspot Medical\n\n"
+        "Just wanted to flag that we have some availability in {city} on {available_dates}, "
+        "in case that works for you. As a reminder, the total quote was "
+        "for {quote_amount} (including {referrer_name}'s {discount_percentage}% discount).\n\n"
+        "Below are some of our reviews which gives a nice insight into the value our clients get from the service.\n\n"
         "\"Incredible service. After living in a house that nearly killed me, these guys were literally lifesavers.\" "
         "- Chris Williamson, Host of Modern Wisdom podcast\n\n"
         "\"Lightwork's home health audit was next level. They went deep into our lighting, air, water, EMFs, and more. "
@@ -148,11 +155,22 @@ CADENCE = {
         "discovered on my own. They were incredibly thorough, tested every aspect of my home that could be impacting "
         "my family's health, and then helped us get everything resolved. We made the changes right away. Highly recommend.\" "
         "- Andrew Wilkinson, Co-founder of Tiny\n\n"
+        "You can see more of our reviews <a href=\"https://www.lightworkhome.com/reviews\">here</a>.\n\n"
         "Let me know if you have any questions or would like to move forward.\n\n"
         "{sender_name}\n\nCo-founder | Lightwork Home Health"),
-    5: (16, "Availability",
-        "Mention upcoming availability in their area. Create gentle urgency. "
-        "2-3 sentences. No tip."),
+    5: (16, "Clinical credibility",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "Wanted to share what a couple of our clinical partners have said about working with us:\n\n"
+        "\"We regularly refer our patients to Lightwork Home Health because holistic care requires addressing "
+        "the home environment. The science is clear: environmental factors have a major impact on health.\" "
+        "- Dr. Robert Kachko, Director of Integrative Health, Atria Institute\n\n"
+        "\"Lightwork's home health assessment was incredibly detailed and insightful. I actively recommend their "
+        "service to all my patients who want a healthier home and lower environmental toxin exposure.\" "
+        "- Dr. David Boyd MD, Concierge Medicine Physician & Founder, Blindspot Medical\n\n"
+        "We work closely with physicians and functional medicine practitioners who see environmental "
+        "factors as a key piece of their patients' health. Happy to answer any questions.\n\n"
+        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
     6: (25, "Graceful close",
         "Last active email. 2 sentences max. 'Just wanted to leave the door open. "
         "We're here whenever you're ready.' Do NOT include a resource or tip. Just be human."),
@@ -263,6 +281,9 @@ OWNER_TO_EMAIL = {v: k for k, v in TEAM_EMAIL_TO_NAME.items()}
 
 # SQLite draft cache
 DRAFT_DB_PATH = SCRIPT_DIR / "drafts.db"
+
+# SQLite transcript cache (persistent across runs, avoids re-fetching from MCP)
+TRANSCRIPT_DB_PATH = SCRIPT_DIR / "transcripts.db"
 
 # AI provider
 # - anthropic: existing behavior (default)
@@ -1117,19 +1138,20 @@ def get_followup_history(lead_id, first_call_date, debug=False):
                     if debug:
                         print(f"    [SKIP] {subject} (contains 'assessment')")
                     continue
-                # Skip scheduling/booking thread emails entirely.
-                # These are cal.com auto-generated threads for setting up the
-                # meeting. Even if a follow-up is later sent in this thread,
-                # it should use a fresh subject line to count properly.
+                # Skip the original scheduling/booking confirmation, but
+                # count replies (Re:) in the same thread as follow-ups.
+                # The team often replies to the booking thread with their
+                # actual follow-up message.
                 is_scheduling_thread = any(
                     p in subj_lower for p in (
                         "test call between", "testing call between",
                         "partner call between", "intro call between",
                     )
                 )
-                if is_scheduling_thread:
+                is_reply = subj_lower.startswith("re:") or subj_lower.startswith("fwd:")
+                if is_scheduling_thread and not is_reply:
                     if debug:
-                        print(f"    [SKIP] {subject} (scheduling thread)")
+                        print(f"    [SKIP] {subject} (original scheduling email)")
                     continue
                 norm = _normalize_subject(subject)
                 day_key = email_date[:10]  # "2026-01-21"
@@ -1658,8 +1680,16 @@ def mcp_match_meeting(close_meeting: dict, mcp_meetings: list) -> dict | None:
 
 
 def mcp_get_transcript_text(client: "GranolaMCPClient", meeting_id: str) -> str:
+    """Fetch transcript text from Granola MCP. Raises GranolaRateLimitError on rate limit."""
     res = client.tools_call("get_meeting_transcript", {"meeting_id": meeting_id})
     text = _mcp_text_content(res).strip()
+    is_error = (res or {}).get("isError", False)
+
+    # Detect rate limit: either the isError flag is set with rate limit text,
+    # or the response text itself mentions rate limit
+    if is_error or (text and "rate limit" in text.lower()):
+        raise GranolaRateLimitError(f"Rate limited fetching transcript for {meeting_id}: {text[:200]}")
+
     if not text:
         return ""
     # Tool returns a JSON object as text.
@@ -1770,6 +1800,51 @@ def _save_draft(conn, lead_id, fu_number, cadence_type, raw_output, input_hash):
             input_hash,
             datetime.now(timezone.utc).isoformat(),
         ),
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# SQLite transcript cache
+# ---------------------------------------------------------------------------
+
+
+def _init_transcript_db():
+    """Create the transcripts table if it doesn't exist, return a connection."""
+    conn = sqlite3.connect(TRANSCRIPT_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transcripts (
+            meeting_id TEXT PRIMARY KEY,
+            transcript_text TEXT,
+            meeting_notes TEXT,
+            source TEXT,
+            fetched_at TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def _get_cached_transcript(conn, meeting_id):
+    """Return cached transcript dict or None if not found."""
+    row = conn.execute(
+        "SELECT transcript_text, meeting_notes, source FROM transcripts "
+        "WHERE meeting_id = ?",
+        (meeting_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"transcript_text": row[0] or "", "meeting_notes": row[1] or "", "source": row[2] or ""}
+
+
+def _save_transcript(conn, meeting_id, transcript_text="", meeting_notes="", source=""):
+    """Upsert a transcript into the cache."""
+    conn.execute(
+        "INSERT OR REPLACE INTO transcripts "
+        "(meeting_id, transcript_text, meeting_notes, source, fetched_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (meeting_id, transcript_text or "", meeting_notes or "", source,
+         datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
 
@@ -2539,27 +2614,35 @@ def build_lead_section(lead_info, claude_output, granola_found,
 def build_digest_html(sections_by_owner, date_str, total_leads,
                       tracker_html="",
                       action_items_by_owner=None,
+                      sections_by_owner_noshow=None,
+                      action_items_by_owner_noshow=None,
                       run_meta=None):
     """Build the full HTML digest email."""
     if action_items_by_owner is None:
         action_items_by_owner = {}
+    if sections_by_owner_noshow is None:
+        sections_by_owner_noshow = {}
+    if action_items_by_owner_noshow is None:
+        action_items_by_owner_noshow = {}
     if run_meta is None:
         run_meta = {}
 
-    dynamic_owners = set(list(action_items_by_owner.keys()) + list(sections_by_owner.keys()))
+    dynamic_owners = set(
+        list(action_items_by_owner.keys()) + list(sections_by_owner.keys())
+        + list(action_items_by_owner_noshow.keys()) + list(sections_by_owner_noshow.keys())
+    )
     owners = []
     for o in OWNER_TAB_ORDER:
         owners.append(o)
         dynamic_owners.discard(o)
     owners.extend(sorted(dynamic_owners))
-    owner_counts = {o: len(sections_by_owner.get(o, [])) for o in owners}
+    owner_counts = {
+        o: len(sections_by_owner.get(o, [])) + len(sections_by_owner_noshow.get(o, []))
+        for o in owners
+    }
 
-    # Compact action list at the top
-    action_blocks = ""
-    for owner in owners:
-        items = action_items_by_owner.get(owner, [])
-        if not items:
-            continue
+    # Compact action list at the top (split into completed and no-show)
+    def _build_action_rows(items, owner):
         rows = ""
         for it in items:
             transcript_state = "yes" if str(it.get("transcript_state", "no")) == "yes" else "no"
@@ -2581,13 +2664,10 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
               </td>
             </tr>
             """
+        return rows
 
-        owner_slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in owner).strip("-")
-        action_blocks += f"""
-        <div class="lw-owner-group lw-owner-scope" data-owner-group="{html_mod.escape(owner)}" data-owner-scope="{html_mod.escape(owner)}" style="margin-top:14px;">
-          <div style="font-size:12px; color:#888; font-weight:800; letter-spacing:0.02em; text-transform:uppercase; margin:0 0 6px 0;">
-            <a id="section-actions-{owner_slug}" style="color:inherit; text-decoration:none;">{html_mod.escape(owner)}: Action List</a>
-          </div>
+    def _build_action_table(rows):
+        return f"""
           <table style="width:100%; border-collapse:collapse; background:#fff; border:1px solid #eee; border-radius:8px; overflow:hidden;">
             <tr style="border-bottom:2px solid #ddd;">
               <th style="padding:6px 10px; text-align:left; font-size:11px; color:#888; text-transform:uppercase;">Lead</th>
@@ -2595,23 +2675,65 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
               <th style="padding:6px 6px; text-align:right; font-size:11px; color:#888; text-transform:uppercase;">Copy</th>
             </tr>
             {rows}
-          </table>
+          </table>"""
+
+    action_blocks = ""
+    for owner in owners:
+        completed_items = action_items_by_owner.get(owner, [])
+        noshow_items = action_items_by_owner_noshow.get(owner, [])
+        if not completed_items and not noshow_items:
+            continue
+
+        owner_slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in owner).strip("-")
+        inner = ""
+
+        if completed_items:
+            rows = _build_action_rows(completed_items, owner)
+            inner += f"""
+            <div style="font-size:11px; color:#2E5B88; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; margin:0 0 4px 0;">Calls Completed ({len(completed_items)})</div>
+            {_build_action_table(rows)}"""
+
+        if noshow_items:
+            rows = _build_action_rows(noshow_items, owner)
+            inner += f"""
+            <div style="font-size:11px; color:#c0392b; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; margin:{('12px' if completed_items else '0')} 0 4px 0;">No-Shows ({len(noshow_items)})</div>
+            {_build_action_table(rows)}"""
+
+        action_blocks += f"""
+        <div class="lw-owner-group lw-owner-scope" data-owner-group="{html_mod.escape(owner)}" data-owner-scope="{html_mod.escape(owner)}" style="margin-top:14px;">
+          <div style="font-size:12px; color:#888; font-weight:800; letter-spacing:0.02em; text-transform:uppercase; margin:0 0 6px 0;">
+            <a id="section-actions-{owner_slug}" style="color:inherit; text-decoration:none;">{html_mod.escape(owner)}: Action List</a>
+          </div>
+          {inner}
         </div>
         """
 
     owner_blocks = ""
     for owner in owners:
-        sections = sections_by_owner.get(owner, [])
-        if not sections:
+        completed_sections = sections_by_owner.get(owner, [])
+        noshow_sections = sections_by_owner_noshow.get(owner, [])
+        if not completed_sections and not noshow_sections:
             continue
-        count = len(sections)
+        total_count = len(completed_sections) + len(noshow_sections)
         owner_slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in owner).strip("-")
+
+        inner_blocks = ""
+        if completed_sections:
+            inner_blocks += f"""
+      <div style="font-size:13px; color:#2E5B88; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; margin:0 0 10px 0; padding:6px 10px; background:#eaf1f8; border-radius:4px;">Calls Completed ({len(completed_sections)})</div>
+      {"".join(completed_sections)}"""
+
+        if noshow_sections:
+            inner_blocks += f"""
+      <div style="font-size:13px; color:#c0392b; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; margin:{('20px' if completed_sections else '0')} 0 10px 0; padding:6px 10px; background:#fdf0ef; border-radius:4px;">No-Shows ({len(noshow_sections)})</div>
+      {"".join(noshow_sections)}"""
+
         owner_blocks += f"""
     <div class="lw-owner-group lw-owner-scope" data-owner-group="{html_mod.escape(owner)}" data-owner-scope="{html_mod.escape(owner)}" style="margin-top:28px;">
       <h2 style="background:#2E5B88; color:white; padding:10px 16px; border-radius:6px; margin:0 0 16px 0; font-size:16px;">
-        <a id="section-owner-{owner_slug}" style="color:inherit; text-decoration:none;">{owner.upper()}'S FOLLOW-UPS ({count})</a>
+        <a id="section-owner-{owner_slug}" style="color:inherit; text-decoration:none;">{owner.upper()}'S FOLLOW-UPS ({total_count})</a>
       </h2>
-      {"".join(sections)}
+      {inner_blocks}
     </div>"""
 
     # Owner tabs
@@ -2938,6 +3060,135 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 
 
 # ---------------------------------------------------------------------------
+# Transcript sync (one-time bulk pull from Granola MCP)
+# ---------------------------------------------------------------------------
+
+
+def _sync_transcripts_from_mcp(batch_size: int = 20):
+    """Connect to Granola MCP, list all meetings, fetch only missing transcripts, save to DB.
+
+    Uses exponential backoff on rate limits and stops after 3 consecutive failures.
+    Limits new fetches per run to batch_size to avoid hitting rate limits.
+    """
+    print("Transcript sync: connecting to Granola MCP...")
+
+    if not GRANOLA_MCP_ENABLE:
+        print("Error: Set GRANOLA_MCP_ENABLE=1 to use MCP sync.")
+        print("  Example: GRANOLA_MCP_ENABLE=1 python3 post_call_digest.py --sync-transcripts")
+        return
+
+    try:
+        mcp_client = GranolaMCPClient(enable_interactive_login=True)
+        mcp_client.initialize()
+    except Exception as e:
+        print(f"Error connecting to Granola MCP: {e}")
+        return
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=730)  # 2 years back
+
+    print("Listing meetings (last 2 years)...")
+    try:
+        meetings = mcp_list_meetings(mcp_client, since, now)
+    except Exception as e:
+        print(f"Error listing meetings: {e}")
+        return
+    print(f"  Found {len(meetings)} total meetings")
+
+    # Filter to Lightwork calls only (by title or team email in attendees)
+    lw_meetings = []
+    for m in meetings:
+        title = (m.get("title") or "").lower()
+        emails = m.get("emails") or set()
+        is_lightwork = "lightwork" in title or bool(emails & TEAM_EMAILS)
+        if is_lightwork:
+            lw_meetings.append(m)
+    print(f"  {len(lw_meetings)} Lightwork calls (filtered)")
+
+    transcript_db = _init_transcript_db()
+
+    # Clean up false empties from previous rate-limited runs
+    cleaned = transcript_db.execute(
+        "DELETE FROM transcripts WHERE transcript_text = '' AND source = 'mcp'"
+    ).rowcount
+    transcript_db.commit()
+    if cleaned:
+        print(f"  Cleaned {cleaned} empty records from previous rate-limited runs")
+
+    already_cached = 0
+    newly_fetched = 0
+    empty = 0
+    errors = 0
+    consecutive_rate_limits = 0
+    backoff_seconds = 2.0  # Starting delay between requests
+    max_backoff = 30.0
+    rate_limit_backoffs = [10, 20, 30]  # Escalating waits on consecutive rate limits
+
+    for i, m in enumerate(lw_meetings, 1):
+        mid = m.get("id", "")
+        if not mid:
+            continue
+
+        # Skip if already in DB with real content
+        cached = _get_cached_transcript(transcript_db, mid)
+        if cached is not None and cached["transcript_text"]:
+            already_cached += 1
+            continue
+
+        # Batch limit: stop fetching new transcripts after batch_size
+        if newly_fetched + empty >= batch_size:
+            remaining = len(lw_meetings) - i - already_cached
+            print(f"\n  Batch limit reached ({batch_size}). ~{remaining} meetings remain.")
+            print("  Re-run to fetch the next batch.")
+            break
+
+        # Fetch transcript using the function that raises on rate limit
+        try:
+            text = mcp_get_transcript_text(mcp_client, mid)
+            consecutive_rate_limits = 0  # Reset on success
+            backoff_seconds = 2.0  # Reset backoff on success
+        except GranolaRateLimitError:
+            consecutive_rate_limits += 1
+            if consecutive_rate_limits >= 3:
+                remaining = len(lw_meetings) - i - already_cached
+                print(f"\n  Stopped: 3 consecutive rate limits. ~{remaining} meetings remain.")
+                print("  Wait a few minutes, then re-run to continue.")
+                errors += consecutive_rate_limits
+                break
+            wait = rate_limit_backoffs[min(consecutive_rate_limits - 1, len(rate_limit_backoffs) - 1)]
+            print(f"  [{i}/{len(lw_meetings)}] Rate limited, waiting {wait}s (attempt {consecutive_rate_limits}/3)...")
+            time.sleep(wait)
+            errors += 1
+            continue
+        except Exception as e:
+            print(f"  [{i}/{len(lw_meetings)}] Error fetching {mid}: {e}")
+            errors += 1
+            time.sleep(backoff_seconds)
+            continue
+
+        if text:
+            _save_transcript(transcript_db, mid, transcript_text=text, source="mcp")
+            newly_fetched += 1
+        else:
+            # Genuinely empty transcript (not a rate limit error)
+            _save_transcript(transcript_db, mid, transcript_text="", source="mcp")
+            empty += 1
+
+        if (newly_fetched + empty) % 10 == 0:
+            print(f"  [{i}/{len(lw_meetings)}] {newly_fetched} new, {already_cached} cached, {empty} empty...")
+
+        time.sleep(backoff_seconds)  # Pace requests
+
+    transcript_db.close()
+    print(f"\nSync complete:")
+    print(f"  {already_cached} already cached (skipped)")
+    print(f"  {newly_fetched} newly fetched with transcripts")
+    print(f"  {empty} meetings with no transcript")
+    if errors:
+        print(f"  {errors} errors/rate-limits")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2947,7 +3198,16 @@ def main():
     parser.add_argument("--fresh", action="store_true", help="Ignore draft cache, regenerate all")
     parser.add_argument("--no-email", action="store_true", help="Skip sending reminder emails")
     parser.add_argument("--debug-lead", type=str, default="", help="Print detailed email history for a lead (by name substring)")
+    parser.add_argument("--sync-transcripts", action="store_true",
+                        help="Bulk-pull missing transcripts from Granola MCP into local DB, then exit")
+    parser.add_argument("--batch-size", type=int, default=20,
+                        help="Max new transcripts to fetch per sync run (default: 20)")
     args = parser.parse_args()
+
+    # --sync-transcripts: one-time bulk pull, then exit
+    if args.sync_transcripts:
+        _sync_transcripts_from_mcp(batch_size=args.batch_size)
+        return
 
     # Validate required env vars early
     if not CLOSE_API_KEY:
@@ -2960,8 +3220,9 @@ def main():
         print("Error: OPENAI_API_KEY not set. Add it to .env or set SKIP_CLAUDE=1.")
         return
 
-    # Initialize draft cache
+    # Initialize caches
     draft_db = _init_draft_db()
+    transcript_db = _init_transcript_db()
 
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%b %-d, %Y")
@@ -3040,17 +3301,36 @@ def main():
 
         earliest_meeting = min(info["meetings"], key=lambda m: m.get("starts_at", ""))
 
-        # MCP first
+        # MCP first (match meeting, then check DB before live fetch)
         if mcp_client and mcp_meetings:
             m = mcp_match_meeting(earliest_meeting, mcp_meetings)
             if m:
                 mid = m["id"]
                 info["mcp_meeting_id"] = mid
+                # Check transcript DB first
+                cached = _get_cached_transcript(transcript_db, mid)
+                if cached is not None and cached["transcript_text"]:
+                    mcp_transcripts[mid] = cached["transcript_text"]
+                    info["transcript_label"] = "Yes (cached)"
+                    continue
+                if cached is not None:
+                    # Empty transcript in DB (meeting had no transcript)
+                    mcp_transcripts[mid] = ""
+                    info["transcript_label"] = "No (cached)"
+                    continue
+                # Not in DB: fetch from MCP and save
                 if mid not in mcp_transcripts:
                     try:
                         mcp_transcripts[mid] = mcp_get_transcript_text(mcp_client, mid)
+                    except GranolaRateLimitError:
+                        # Don't save empty record on rate limit; skip so we retry later
+                        mcp_transcripts[mid] = ""
+                        info["transcript_label"] = "Rate limited"
+                        continue
                     except Exception:
                         mcp_transcripts[mid] = ""
+                    _save_transcript(transcript_db, mid,
+                                     transcript_text=mcp_transcripts[mid], source="mcp")
                 if mcp_transcripts[mid]:
                     info["transcript_label"] = "Yes (MCP)"
                     continue
@@ -3093,8 +3373,10 @@ def main():
         VOICE_GUIDE_CONDENSED_PATH, FOLLOWUP_EXAMPLES_PATH, fallback_cap=2000
     )
 
-    sections_by_owner = {}
-    action_items_by_owner = {}
+    sections_by_owner = {}          # owner -> list of HTML sections (completed calls)
+    sections_by_owner_noshow = {}    # owner -> list of HTML sections (no-shows)
+    action_items_by_owner = {}       # owner -> list of action dicts (completed calls)
+    action_items_by_owner_noshow = {}  # owner -> list of action dicts (no-shows)
     missing_transcripts_count = 0
 
     for i, entry in enumerate(due_leads):
@@ -3132,21 +3414,38 @@ def main():
             call_notes = "NO-SHOW: Meeting was canceled or marked no-show."
             transcript_present = True
 
-        # MCP transcript
-        if (not no_show) and mcp_client:
+        # Check transcript DB first, then MCP live
+        if not no_show:
             mid = entry.get("mcp_meeting_id")
             if mid:
-                transcript = mcp_transcripts.get(mid)
-                if transcript is None:
-                    try:
-                        transcript = mcp_get_transcript_text(mcp_client, mid)
-                    except Exception:
-                        transcript = ""
-                    mcp_transcripts[mid] = transcript
-                if transcript:
+                # DB cache check
+                cached = _get_cached_transcript(transcript_db, mid)
+                if cached is not None and cached["transcript_text"]:
                     transcript_present = True
-                    call_notes = "CALL TRANSCRIPT:\n" + transcript[:TRANSCRIPT_CAP_SHEET]
-                    print("  Transcript: Granola MCP")
+                    call_notes = "CALL TRANSCRIPT:\n" + cached["transcript_text"][:TRANSCRIPT_CAP_SHEET]
+                    print("  Transcript: cached DB")
+                elif cached is None and mcp_client:
+                    # Not in DB, fetch from MCP
+                    transcript = mcp_transcripts.get(mid)
+                    if transcript is None:
+                        try:
+                            transcript = mcp_get_transcript_text(mcp_client, mid)
+                        except GranolaRateLimitError:
+                            transcript = ""
+                            mcp_transcripts[mid] = ""
+                            print("  Transcript: rate limited (will retry next run)")
+                            # Don't save to DB so it gets retried
+                        except Exception:
+                            transcript = ""
+                            mcp_transcripts[mid] = ""
+                        else:
+                            mcp_transcripts[mid] = transcript
+                            _save_transcript(transcript_db, mid,
+                                             transcript_text=transcript, source="mcp")
+                    if transcript:
+                        transcript_present = True
+                        call_notes = "CALL TRANSCRIPT:\n" + transcript[:TRANSCRIPT_CAP_SHEET]
+                        print("  Transcript: Granola MCP (live)")
 
         if (not no_show) and (not transcript_present) and (not call_notes) and sheet_rows:
             sheet_match = match_granola_sheet(earliest_meeting, sheet_rows)
@@ -3241,13 +3540,17 @@ def main():
             cadence_type=cadence_type,
             no_show=no_show,
         )
-        sections_by_owner.setdefault(owner, []).append(section)
+        if no_show:
+            sections_by_owner_noshow.setdefault(owner, []).append(section)
+        else:
+            sections_by_owner.setdefault(owner, []).append(section)
 
         # Build compact action item for the top list (copy-friendly)
         parsed = _parse_ai_sections(claude_output)
         copy_subject = f"No-show follow-up {fu_number}: {fu_type}" if no_show else f"Follow-up {fu_number}: {fu_type}"
         copy_body = (parsed.get("draft") or parsed.get("raw") or "").strip()
-        action_items_by_owner.setdefault(owner, []).append(
+        action_dest = action_items_by_owner_noshow if no_show else action_items_by_owner
+        action_dest.setdefault(owner, []).append(
             {
                 "name": lead_name,
                 "close_url": lead_info.get("html_url", ""),
@@ -3264,13 +3567,16 @@ def main():
         )
 
     # 6. Build digest HTML and save to file
-    total_leads = sum(len(s) for s in sections_by_owner.values())
+    total_leads = (sum(len(s) for s in sections_by_owner.values())
+                   + sum(len(s) for s in sections_by_owner_noshow.values()))
     html = build_digest_html(
         sections_by_owner,
         date_str,
         total_leads,
         tracker_html=tracker_html,
         action_items_by_owner=action_items_by_owner,
+        sections_by_owner_noshow=sections_by_owner_noshow,
+        action_items_by_owner_noshow=action_items_by_owner_noshow,
         run_meta={
             "last_run": last_run_str,
             "mcp_status": mcp_status,
@@ -3287,13 +3593,19 @@ def main():
     # Auto-open in browser
     subprocess.run(["open", str(output_path)])
 
-    # Send email reminders to each team member
-    if not args.no_email and action_items_by_owner:
+    # Send email reminders to each team member (merge completed + no-show)
+    all_action_items = {}
+    for o, items in action_items_by_owner.items():
+        all_action_items.setdefault(o, []).extend(items)
+    for o, items in action_items_by_owner_noshow.items():
+        all_action_items.setdefault(o, []).extend(items)
+    if not args.no_email and all_action_items:
         print("\nSending follow-up reminders...")
-        _send_owner_reminders(action_items_by_owner, date_str)
+        _send_owner_reminders(all_action_items, date_str)
 
-    # Close draft cache
+    # Close caches
     draft_db.close()
+    transcript_db.close()
 
 
 if __name__ == "__main__":

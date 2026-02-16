@@ -92,3 +92,63 @@
 10. Improve typography hierarchy:
    - Larger lead name, smaller metadata, consistent spacing, and a single accent color per owner.
 
+---
+
+## Next Task: Categorize Pipeline Tracker into Call Completed vs No-Show
+
+### What
+Split the pipeline tracker table rows into two labeled sub-groups per owner:
+1. **Calls Completed** - leads whose call actually happened
+2. **No-Shows** - leads whose meeting was canceled/no-show
+
+### Where
+`post_call_digest.py`, function `build_tracker_view()` (line ~2297)
+
+### How
+Inside the `for owner in ordered_owners` loop (line ~2324), split the leads list into two:
+
+```python
+completed = [e for e in leads if not e.get("no_show")]
+noshows = [e for e in leads if e.get("no_show")]
+```
+
+Then render each group's rows with a sub-header row in the table:
+- **"Calls Completed (X)"** row in blue before completed leads
+- **"No-Shows (Y)"** row in red before no-show leads
+- Skip the sub-header if a group is empty
+
+### Verification
+Run `python3 post_call_digest.py --no-email` and check that the pipeline tracker table shows two labeled groups per owner.
+
+---
+
+## Bug: Follow-ups sent but not detected (Romeo Ju, Gilbert Garza, Lance)
+
+### Problem
+Emails drafted by the digest were copied and sent by the user, but the system still shows these leads as needing follow-up. The same issue affects Romeo Ju, Gilbert Garza, and Lance.
+
+### Root Cause (likely)
+`get_followup_history()` (line ~1079) counts follow-ups by querying **Close.com's outgoing email API** (`/activity/email/` with `direction == "outgoing"`). If the user copies the draft and sends it from Gmail instead of through Close.com, the email only shows up in Close.com if:
+1. The sender's Gmail is connected to Close.com via email sync
+2. Close.com's sync has had time to pick it up (can take minutes to hours)
+
+### Investigation Steps
+1. Check if the team's Gmail accounts are synced to Close.com (Settings > Connected Accounts)
+2. Run `python3 post_call_digest.py --debug-lead "Romeo"` to see what outgoing emails Close.com has for this lead
+3. Check Close.com manually: open Romeo Ju's lead page and look for the sent email in the activity feed
+
+### Root Cause (confirmed)
+The scheduling thread filter (`get_followup_history`, line ~1130) was skipping ALL emails in booking threads, including follow-up replies. The team replies to the cal.com booking confirmation with their actual follow-up, so these were never counted.
+
+### Fix (applied)
+Changed the filter to only skip the **original** booking email (no `Re:`/`Fwd:` prefix). Replies in booking threads now count as follow-ups.
+
+### Impact
+Multiple leads were affected (not just Romeo). After the fix:
+- Romeo Ju: FU 1 -> FU 2
+- Avital Ferd: FU 1 -> FU 2
+- Asif Nazerally: FU 1 -> FU 2
+- Lance Loveday: FU 1 -> FU 2
+- Jonathan Cronstedt: FU 1 -> FU 4
+- Ryan Moran: FU 1 -> FU 2
+- Eduardo Serrano: FU 1 -> FU 2
