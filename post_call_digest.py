@@ -122,8 +122,8 @@ CADENCE = {
     3: (6, "Key findings",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
-        "I wanted to share a few examples of problems we've found in recent home assessments.\n\n"
-        "We identified several critical issues that many homeowners aren't aware of:\n\n"
+        "Hope things are going well. One thing worth mentioning: we find issues in every home we test, "
+        "regardless of how new or well-maintained it is. Here are a few recent examples:\n\n"
         "- Hidden mold contamination despite multiple previous professional tests which gave the 'all clear.' "
         "We advised on a specialist manual inspection and coordinated next steps with our recommended inspector for the area.\n"
         "- Elevated trihalomethanes in shower water (which we continue to see in many homes we test). "
