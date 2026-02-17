@@ -31,7 +31,7 @@ from pathlib import Path
 
 # Import everything from the main script
 from post_call_digest import (
-    CADENCE, CADENCE_LOOKBACK_DAYS, NO_SHOW_STATUSES, OWNER_SIGNATURE, SCRIPT_DIR,
+    CADENCE, CADENCE_LOOKBACK_DAYS, NO_SHOW_CADENCE, NO_SHOW_STATUSES, OWNER_SIGNATURE, SCRIPT_DIR,
     TEAM_EMAIL_TO_NAME, TRANSCRIPT_CAP_SHEET,
     _extract_first_name, _fetch_all_meetings, _filter_meetings_in_range,
     _load_condensed_or_fallback,
@@ -135,7 +135,8 @@ is_no_show = bool(latest_no_show and latest_no_show > latest_completed)
 sales_scripts = _load_condensed_or_fallback(SALES_TIPS_CONDENSED_PATH, SALES_SCRIPTS_PATH, 3000)
 followup_examples = _load_condensed_or_fallback(VOICE_GUIDE_CONDENSED_PATH, FOLLOWUP_EXAMPLES_PATH, 2000)
 
-print(f"\nGenerating all 7 follow-ups for: {lead_name}")
+n_touches = len(NO_SHOW_CADENCE) if is_no_show else len(CADENCE)
+print(f"\nGenerating all {n_touches} follow-ups for: {lead_name}")
 print(f"  Owner: {owner}")
 print(f"  First call: {info['first_call_date'].strftime('%b %d, %Y')}")
 print(f"  No-show: {'YES' if is_no_show else 'No'}")
@@ -147,16 +148,20 @@ print()
 cumulative_emails = []
 drafts = []
 
-for fu_num in range(1, 8):
-    day_offset, fu_type, fu_instructions = CADENCE[fu_num]
-    print(f"  [{fu_num}/7] FU #{fu_num} - {fu_type} (Day {day_offset})...")
+active_cadence = NO_SHOW_CADENCE if is_no_show else CADENCE
+active_cadence_type = "no_show" if is_no_show else "active"
+total_touches = len(active_cadence)
+
+for fu_num in range(1, total_touches + 1):
+    day_offset, fu_type, fu_instructions = active_cadence[fu_num]
+    print(f"  [{fu_num}/{total_touches}] FU #{fu_num} - {fu_type} (Day {day_offset})...")
 
     raw = generate_digest_for_call(
         lead_info, chosen_notes, earliest,
         owner_name=owner,
         fu_number=fu_num,
         sent_emails=list(cumulative_emails),  # copy
-        cadence_type="active",
+        cadence_type=active_cadence_type,
         no_show=is_no_show,
         sales_scripts=sales_scripts,
         followup_examples=followup_examples,
@@ -220,12 +225,14 @@ custom = lead_info.get("custom", {})
 addresses = lead_info.get("addresses", [])
 city = addresses[0].get("city", "") if addresses else ""
 
+cadence_label = "Rebook" if is_no_show else "7-Touch"
+header_bg = "#e67e22" if is_no_show else "#2E5B88"
 html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>7-Touch Demo: {html_mod.escape(lead_name)}</title></head>
+<html><head><meta charset="utf-8"><title>{cadence_label} Demo: {html_mod.escape(lead_name)}</title></head>
 <body style="font-family:sans-serif; max-width:750px; margin:0 auto; padding:20px; background:#f5f5f5;">
 
-<div style="background:#2E5B88; color:white; padding:20px; border-radius:8px 8px 0 0;">
-  <h1 style="margin:0; font-size:22px;">7-Touch Cadence Demo</h1>
+<div style="background:{header_bg}; color:white; padding:20px; border-radius:8px 8px 0 0;">
+  <h1 style="margin:0; font-size:22px;">{cadence_label} Cadence Demo</h1>
   <p style="margin:6px 0 0 0; opacity:0.85; font-size:14px;">{html_mod.escape(lead_name)} ({html_mod.escape(city)}) | Owner: {html_mod.escape(owner)}</p>
 </div>
 

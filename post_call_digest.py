@@ -2187,6 +2187,12 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
     max_touches = len(cadence)
     day_offset, fu_type, fu_instructions = cadence[fu_number]
 
+    # Substitute booking link placeholder in no-show cadence instructions
+    if cadence_type == "no_show" and "{booking_link}" in fu_instructions:
+        sender = owner_name if owner_name in OWNER_SIGNATURE else "Jay"
+        booking_link = OWNER_BOOKING_LINK.get(sender, OWNER_BOOKING_LINK["Jay"])
+        fu_instructions = fu_instructions.replace("{booking_link}", booking_link)
+
     # Build cadence overview for context
     cadence_overview = "\n".join(
         f"  FU {n}: Day {d} - {t}" for n, (d, t, _) in cadence.items()
