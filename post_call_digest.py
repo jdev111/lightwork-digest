@@ -205,14 +205,67 @@ NURTURE_CADENCE = {
         "'Always here if you need us.' Leave the door open warmly."),
 }
 
+# No-show / canceled meeting cadence (rebook-focused, 5 touches)
+NO_SHOW_CADENCE = {
+    1: (1, "Acknowledge + reschedule",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "No worries at all. Here's my link if you'd like to rebook: "
+        "{booking_link}\n\n"
+        "Feel free to reach out if you have any questions in the meantime.\n\n"
+        "Best,\n{sender_name}\n\nCo-founder | Lightwork Home Health\n\n"
+        "Keep it exactly this short. No guilt, no explanation needed."),
+    2: (3, "Value drop",
+        "Share ONE specific, useful home health tip based on their 'why reaching out' field or city. "
+        "Solve a small problem that reveals a bigger one. "
+        "Do NOT mention rescheduling. Do NOT mention the missed call. "
+        "Just deliver value as if you're helping a friend. "
+        "End with a soft one-liner like 'Happy to chat more about this whenever.' "
+        "2-3 sentences max."),
+    3: (7, "Social proof",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "Wanted to share this recent write-up that "
+        "<a href=\"https://x.com/awilkinson\">Andrew Wilkinson</a> (co-founder of Tiny) "
+        "did on our service. Here's <a href=\"https://www.lightworkhome.com/blog-posts/wilkinson\">the link.</a>\n\n"
+        "Let me know if you have any questions.\n\n"
+        "Best,\n{sender_name}\n\nCo-founder | Lightwork Home Health"),
+    4: (14, "Availability mention",
+        "Mention that you'll be in their city/area soon. "
+        "Frame it as a heads-up, not pressure. "
+        "2 sentences max. No tip, no resource."),
+    5: (30, "Graceful close",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "Just wanted to leave the door open. We're here whenever you're ready.\n\n"
+        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
+}
+
+# Owner booking links (Cal.com)
+OWNER_BOOKING_LINK = {
+    "Jay": "https://cal.com/lightworkhome/lightwork-home-health-test-call",
+    "Johnny": "https://cal.com/lightworkhome/lightwork-home-health-nyc-testing-call",
+    "Dom": "https://cal.com/lightworkhomesf/lightwork-home-health-test-call",
+    "Josh": "https://cal.com/josh-ruben-1q4w0b/lightwork-home-health-test-call",
+}
+
 # Opportunity statuses that put a lead into nurture instead of active cadence
 NURTURE_OPP_STATUSES = {"lost"}
+
+
+def _get_cadence(cadence_type):
+    """Return the cadence dict for the given cadence type."""
+    if cadence_type == "nurture":
+        return NURTURE_CADENCE
+    if cadence_type == "no_show":
+        return NO_SHOW_CADENCE
+    return CADENCE
 
 # Only process leads whose first call was within this many days
 CADENCE_LOOKBACK_DAYS = 45
 
-# Max leads per digest (prevents backlog flood on first run)
-MAX_LEADS_PER_DIGEST = 8
+# Max leads per owner per digest (prevents backlog flood on first run)
+MAX_LEADS_PER_OWNER = 20
 
 # Meeting matching
 MATCH_THRESHOLD = 5  # minimum score to consider a transcript match valid
@@ -3448,9 +3501,20 @@ def main():
         return
 
     total_due = len(due_leads)
-    if total_due > MAX_LEADS_PER_DIGEST:
-        print(f"\n{total_due} leads due, capping to {MAX_LEADS_PER_DIGEST} (warmest first)")
-        due_leads = due_leads[:MAX_LEADS_PER_DIGEST]
+    # Cap per owner (e.g. max 20 leads per person per day)
+    owner_counts = {}
+    capped_leads = []
+    skipped = 0
+    for entry in due_leads:
+        owner = entry["owner_name"]
+        owner_counts[owner] = owner_counts.get(owner, 0) + 1
+        if owner_counts[owner] <= MAX_LEADS_PER_OWNER:
+            capped_leads.append(entry)
+        else:
+            skipped += 1
+    due_leads = capped_leads
+    if skipped:
+        print(f"\n{total_due} leads due, capped to {len(due_leads)} ({MAX_LEADS_PER_OWNER}/owner max, {skipped} deferred)")
     else:
         print(f"\n{total_due} leads due for follow-up today")
 
