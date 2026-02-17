@@ -428,8 +428,10 @@ FORBIDDEN_TONE_MARKERS = [
 
 MAX_EXCLAMATIONS = 1
 # These are soft caps; if exceeded we rewrite to be tighter.
-MAX_SENTENCES_BY_FU = {1: 8, 2: 6, 3: 15, 4: 20, 5: 4, 6: 3, 7: 3}
-MAX_WORDS_BY_FU = {1: 170, 2: 120, 3: 300, 4: 400, 5: 80, 6: 60, 7: 40}
+MAX_SENTENCES_BY_FU = {1: 8, 2: 6, 3: 15, 4: 20, 5: 6, 6: 3, 7: 3}
+MAX_WORDS_BY_FU = {1: 170, 2: 120, 3: 300, 4: 400, 5: 130, 6: 60, 7: 40}
+NO_SHOW_MAX_SENTENCES_BY_FU = {1: 4, 2: 4, 3: 4, 4: 3, 5: 2}
+NO_SHOW_MAX_WORDS_BY_FU = {1: 60, 2: 80, 3: 80, 4: 50, 5: 30}
 
 # ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
@@ -516,7 +518,7 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", text or ""))
 
 
-def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None, prior_emails: list | None = None) -> list:
+def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None, prior_emails: list | None = None, cadence_type: str = "active") -> list:
     issues = []
     d = (draft or "").strip()
     dl = d.lower()
@@ -545,8 +547,12 @@ def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None, p
         issues.append("Disallowed link(s): " + ", ".join(disallowed[:5]))
 
     # Tightness
-    max_sent = MAX_SENTENCES_BY_FU.get(int(fu_number), 6)
-    max_words = MAX_WORDS_BY_FU.get(int(fu_number), 150)
+    if cadence_type == "no_show":
+        max_sent = NO_SHOW_MAX_SENTENCES_BY_FU.get(int(fu_number), 4)
+        max_words = NO_SHOW_MAX_WORDS_BY_FU.get(int(fu_number), 80)
+    else:
+        max_sent = MAX_SENTENCES_BY_FU.get(int(fu_number), 6)
+        max_words = MAX_WORDS_BY_FU.get(int(fu_number), 150)
     sc = _sentence_count(d)
     wc = _word_count(d)
     if sc > max_sent:
@@ -1275,9 +1281,9 @@ def get_leads_due_today(customer_leads, debug_lead_name=""):
         no_show = bool(info.get("no_show"))
 
         # Pick the right cadence
-        cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
+        cadence = _get_cadence(cadence_type)
         max_touches = len(cadence)
-        label = "nurture" if cadence_type == "nurture" else "FU"
+        label = "nurture" if cadence_type == "nurture" else ("rebook" if cadence_type == "no_show" else "FU")
 
         debug = bool(debug_lead_name and debug_lead_name.lower() in lead_name.lower())
         if debug:
@@ -1333,10 +1339,10 @@ def get_leads_due_today(customer_leads, debug_lead_name=""):
                 "no_show": no_show,
             })
             status = "DUE TODAY" if days_overdue == 0 else f"OVERDUE by {days_overdue}d"
-            tag = " [NURTURE]" if cadence_type == "nurture" else ""
+            tag = " [NURTURE]" if cadence_type == "nurture" else (" [NO-SHOW]" if cadence_type == "no_show" else "")
             print(f"  {lead_name}: {label} {next_fu}/{max_touches} ({status}){tag}")
         else:
-            tag = " [NURTURE]" if cadence_type == "nurture" else ""
+            tag = " [NURTURE]" if cadence_type == "nurture" else (" [NO-SHOW]" if cadence_type == "no_show" else "")
             print(f"  {lead_name}: {label} {next_fu}/{max_touches} due in {-days_overdue}d{tag}")
 
     # Sort: most overdue first so the cap doesn't drop urgent leads
@@ -2177,7 +2183,7 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
         )
 
     # Get cadence details for this FU number
-    cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
+    cadence = _get_cadence(cadence_type)
     max_touches = len(cadence)
     day_offset, fu_type, fu_instructions = cadence[fu_number]
 
@@ -2194,8 +2200,13 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
             parts.append(f"--- Email {i} ---\nSubject: {em['subject']}\n{em['body']}")
         prior_emails_text = "\n\n".join(parts)
 
-    cadence_label = "LONG-TERM NURTURE" if cadence_type == "nurture" else "ACTIVE"
-    message_mode = "NO-SHOW FOLLOW-UP" if no_show else cadence_label
+    if cadence_type == "nurture":
+        cadence_label = "LONG-TERM NURTURE"
+    elif cadence_type == "no_show":
+        cadence_label = "NO-SHOW REBOOK"
+    else:
+        cadence_label = "ACTIVE"
+    message_mode = cadence_label
 
     meeting_starts_at = meeting.get("starts_at", "")
     days_since_call = None
@@ -2268,8 +2279,9 @@ IMPORTANT RULES:
     if cadence_type == "nurture":
         nurture_note = "\nThis lead previously said they are not interested right now. This is a low-pressure, value-only nurture email. NO asks, NO scheduling mentions, NO pressure. Just share something genuinely useful."
     no_show_note = ""
-    if no_show:
-        no_show_note = "\nThis lead was a no-show or canceled. Write a short, calm no-show follow-up: acknowledge the missed connection in one line, offer a simple path to reschedule, and include one useful takeaway/resource without pressure. Do not pretend a conversation already happened."
+    if cadence_type == "no_show":
+        booking_link = OWNER_BOOKING_LINK.get(sender, OWNER_BOOKING_LINK["Jay"])
+        no_show_note = f"\nThis lead has not yet had a call with us. They scheduled but did not attend. Do NOT reference any conversation or call topics. Booking link: {booking_link}"
 
     # Skip Wilkinson content for leads referred by Andrew Wilkinson
     referral_note = ""
@@ -2283,7 +2295,7 @@ THIS IS FOLLOW-UP #{fu_number} ({fu_type})
 Scheduled for Day {day_offset} after the call.
 {days_since_text}
 
-{"NO-SHOW NOTE: This lead missed the call. Acknowledge it briefly, offer to reschedule, no pressure." if no_show else ""}
+{"NO-SHOW: This lead never had a call. Do NOT reference any conversation." if cadence_type == "no_show" else ""}
 
 SPECIFIC INSTRUCTIONS FOR THIS FOLLOW-UP:
 {fu_instructions}
@@ -2397,7 +2409,7 @@ PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
     for attempt in range(max_rewrites):
         parsed = _parse_ai_sections(raw)
         draft = parsed.get("draft") or parsed.get("raw") or ""
-        issues = _lint_email_draft(draft, int(fu_number), days_since_call, prior_emails=sent_emails)
+        issues = _lint_email_draft(draft, int(fu_number), days_since_call, prior_emails=sent_emails, cadence_type=cadence_type)
         if not issues:
             return raw
 
@@ -2413,6 +2425,7 @@ PRIORITY: [HIGH / MEDIUM / LOW - based on budget, urgency, engagement level]"""
     remaining = _lint_email_draft(
         (_parse_ai_sections(raw).get("draft") or raw or "").strip(),
         int(fu_number), days_since_call, prior_emails=sent_emails,
+        cadence_type=cadence_type,
     )
     if remaining:
         print(f"  Warning: draft still has issues after {max_rewrites} rewrites: {remaining}")
@@ -2482,21 +2495,26 @@ def build_tracker_view(all_leads_status):
             days_since = (datetime.now(timezone.utc) - first_call).days
             cadence_type = entry.get("cadence_type", "active")
             max_touches = entry.get("max_touches", 7)
-            cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
+            cadence = _get_cadence(cadence_type)
             transcript_label = entry.get("transcript_label", "No")
             no_show = bool(entry.get("no_show"))
             transcript_lower = transcript_label.lower()
             transcript_state = "yes" if (transcript_lower.startswith("yes") or transcript_lower.startswith("no-show")) else "no"
 
-            # Nurture badge
+            # Cadence badge
             nurture_badge = ""
             if cadence_type == "nurture":
                 nurture_badge = (
                     ' <span style="background:#8e44ad; color:white; font-size:9px; '
                     'padding:1px 4px; border-radius:2px; vertical-align:middle;">NURTURE</span>'
                 )
+            elif cadence_type == "no_show":
+                nurture_badge = (
+                    ' <span style="background:#e67e22; color:white; font-size:9px; '
+                    'padding:1px 4px; border-radius:2px; vertical-align:middle;">REBOOK</span>'
+                )
             no_show_badge = ""
-            if no_show:
+            if no_show and cadence_type != "no_show":
                 no_show_badge = (
                     ' <span style="background:#c0392b; color:white; font-size:9px; '
                     'padding:1px 4px; border-radius:2px; vertical-align:middle; margin-left:4px;">NO-SHOW</span>'
@@ -2506,7 +2524,7 @@ def build_tracker_view(all_leads_status):
             dots = ""
             for i in range(1, max_touches + 1):
                 if i <= fu_done:
-                    color = "#8e44ad" if cadence_type == "nurture" else "#2E5B88"
+                    color = "#8e44ad" if cadence_type == "nurture" else ("#e67e22" if cadence_type == "no_show" else "#2E5B88")
                 elif i == next_fu and next_fu <= max_touches:
                     color = "#E67E22"
                 else:
@@ -2599,18 +2617,23 @@ def build_lead_section(lead_info, claude_output, granola_found,
     meeting_status = custom.get("Meeting Status", "N/A")
     close_url = lead_info.get("html_url", "")
 
-    cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
+    cadence = _get_cadence(cadence_type)
     max_touches = len(cadence)
 
     location_str = f" ({city})" if city else ""
     transcript_badge = "" if granola_found else ' <span style="color:#c0392b; font-size:12px;">[No transcript]</span>'
 
-    # Nurture badge
+    # Cadence badge
     nurture_badge = ""
     if cadence_type == "nurture":
         nurture_badge = (
             ' <span style="background:#8e44ad; color:white; font-size:11px; '
             'padding:2px 6px; border-radius:3px; margin-left:6px;">NURTURE</span>'
+        )
+    elif cadence_type == "no_show":
+        nurture_badge = (
+            ' <span style="background:#e67e22; color:white; font-size:11px; '
+            'padding:2px 6px; border-radius:3px; margin-left:6px;">REBOOK</span>'
         )
 
     # FU type label from cadence
@@ -2625,13 +2648,13 @@ def build_lead_section(lead_info, claude_output, granola_found,
             f'OVERDUE {days_overdue}d</span>'
         )
     no_show_badge = ""
-    if no_show:
+    if no_show and cadence_type != "no_show":
         no_show_badge = (
             ' <span style="background:#c0392b; color:white; font-size:11px; '
             'padding:2px 6px; border-radius:3px; margin-left:6px;">NO-SHOW</span>'
         )
 
-    bar_color = "#8e44ad" if cadence_type == "nurture" else "#2E5B88"
+    bar_color = "#8e44ad" if cadence_type == "nurture" else ("#e67e22" if cadence_type == "no_show" else "#2E5B88")
     progress_bar = build_progress_bar(fu_done, total=max_touches, completed_color=bar_color)
 
     # Build collapsible previous emails section
@@ -2655,8 +2678,8 @@ def build_lead_section(lead_info, claude_output, granola_found,
             f'</details>'
         )
 
-    accent_color = "#8e44ad" if cadence_type == "nurture" else "#2E5B88"
-    border_color = "#8e44ad" if cadence_type == "nurture" else "#ddd"
+    accent_color = "#8e44ad" if cadence_type == "nurture" else ("#e67e22" if cadence_type == "no_show" else "#2E5B88")
+    border_color = "#8e44ad" if cadence_type == "nurture" else ("#e67e22" if cadence_type == "no_show" else "#ddd")
 
     parsed = _parse_ai_sections(claude_output)
     draft_html = parsed["draft"] or parsed["raw"]
@@ -2686,7 +2709,7 @@ def build_lead_section(lead_info, claude_output, granola_found,
         """
 
     # Copy helpers (browser preview only; email clients will ignore JS).
-    copy_subject = f"No-show follow-up {fu_number}: {fu_type}" if no_show else f"Follow-up {fu_number}: {fu_type}"
+    copy_subject = f"Rebook {fu_number}: {fu_type}" if cadence_type == "no_show" else f"Follow-up {fu_number}: {fu_type}"
     copy_body = (parsed["draft"] or parsed["raw"] or "").strip()
     copy_all = f"Subject: {copy_subject}\n\n{copy_body}".strip()
     transcript_chip = ""
@@ -2820,7 +2843,7 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
         if noshow_items:
             rows = _build_action_rows(noshow_items, owner)
             inner += f"""
-            <div style="font-size:11px; color:#c0392b; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; margin:{('12px' if completed_items else '0')} 0 4px 0;">No-Shows ({len(noshow_items)})</div>
+            <div style="font-size:11px; color:#c0392b; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; margin:{('12px' if completed_items else '0')} 0 4px 0;">Rebook ({len(noshow_items)})</div>
             {_build_action_table(rows)}"""
 
         action_blocks += f"""
@@ -2849,7 +2872,7 @@ def build_digest_html(sections_by_owner, date_str, total_leads,
 
         if noshow_sections:
             inner_blocks += f"""
-      <div style="font-size:13px; color:#c0392b; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; margin:{('20px' if completed_sections else '0')} 0 10px 0; padding:6px 10px; background:#fdf0ef; border-radius:4px;">No-Shows ({len(noshow_sections)})</div>
+      <div style="font-size:13px; color:#c0392b; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; margin:{('20px' if completed_sections else '0')} 0 10px 0; padding:6px 10px; background:#fdf0ef; border-radius:4px;">Rebook ({len(noshow_sections)})</div>
       {"".join(noshow_sections)}"""
 
         owner_blocks += f"""
@@ -3389,6 +3412,9 @@ def main():
         )
         latest_no_show = no_show_by_lead.get(lead_id, "")
         info["no_show"] = bool(latest_no_show and latest_no_show > latest_completed)
+        # Override cadence_type for no-show leads (unless already nurture)
+        if info["no_show"] and info.get("cadence_type") != "nurture":
+            info["cadence_type"] = "no_show"
 
     # 2. Load Granola transcripts early so the tracker can show transcript status.
     # Prefer Granola MCP (authoritative transcripts), then fall back to Sheet/local cache.
@@ -3545,12 +3571,12 @@ def main():
 
         owner = entry["owner_name"]
         cadence_type = entry.get("cadence_type", "active")
-        cadence = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
+        cadence = _get_cadence(cadence_type)
         max_touches = len(cadence)
 
         _, fu_type, _ = cadence[fu_number]
         overdue_str = f" (OVERDUE {days_overdue}d)" if days_overdue > 0 else ""
-        nurture_tag = " [NURTURE]" if cadence_type == "nurture" else ""
+        nurture_tag = " [NURTURE]" if cadence_type == "nurture" else (" [NO-SHOW]" if cadence_type == "no_show" else "")
         print(f"\n[{i+1}/{len(due_leads)}] {lead_name}{nurture_tag}")
         print(f"  Owner: {owner} | FU {fu_number}/{max_touches} ({fu_type}){overdue_str}")
 
@@ -3628,7 +3654,7 @@ def main():
         # Generate FU-specific draft with Claude (or use cached version)
         sent_emails = entry.get("sent_emails", [])
         lead_id = entry["lead_id"]
-        cadence_obj = NURTURE_CADENCE if cadence_type == "nurture" else CADENCE
+        cadence_obj = _get_cadence(cadence_type)
         _, _, fu_instr = cadence_obj[fu_number]
         prior_text = "\n".join(f"{e['subject']}\n{e['body']}" for e in sent_emails) if sent_emails else ""
         input_hash = _draft_input_hash(call_notes, prior_text, fu_instr)
@@ -3694,16 +3720,16 @@ def main():
             cadence_type=cadence_type,
             no_show=no_show,
         )
-        if no_show:
+        if cadence_type == "no_show":
             sections_by_owner_noshow.setdefault(owner, []).append(section)
         else:
             sections_by_owner.setdefault(owner, []).append(section)
 
         # Build compact action item for the top list (copy-friendly)
         parsed = _parse_ai_sections(claude_output)
-        copy_subject = f"No-show follow-up {fu_number}: {fu_type}" if no_show else f"Follow-up {fu_number}: {fu_type}"
+        copy_subject = f"Rebook {fu_number}: {fu_type}" if cadence_type == "no_show" else f"Follow-up {fu_number}: {fu_type}"
         copy_body = (parsed.get("draft") or parsed.get("raw") or "").strip()
-        action_dest = action_items_by_owner_noshow if no_show else action_items_by_owner
+        action_dest = action_items_by_owner_noshow if cadence_type == "no_show" else action_items_by_owner
         action_dest.setdefault(owner, []).append(
             {
                 "name": lead_name,

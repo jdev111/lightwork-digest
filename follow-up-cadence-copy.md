@@ -201,6 +201,18 @@ TIP: Grounding products can be beneficial, but if the home has electronic interf
 
 ---
 
+# No-Show / Canceled Meeting Cadence (5 touches, rebook-focused)
+
+For leads who scheduled but didn't attend the call. Focused on getting them to rebook.
+
+1. **(Day 1)** Acknowledge + easy reschedule. "No worries at all. Here's my link." Ultra-short, zero guilt.
+2. **(Day 3)** Value drop. One specific useful tip based on their situation. No mention of missed call. Let value do the talking. 2-3 sentences.
+3. **(Day 7)** Social proof. Wilkinson write-up or relevant testimonial. No direct ask. 2-3 sentences.
+4. **(Day 14)** Availability mention. "We'll be in {city} soon." Simple heads-up, not pressure. 2 sentences.
+5. **(Day 30)** Graceful close. "Door's always open." 1-2 sentences. Done.
+
+---
+
 # Key Resources
 
 - Example report: https://www.lightworkhome.com/examplereport (password: homehealth)
