@@ -107,7 +107,7 @@ CADENCE = {
         "from the sales scripts that matches what they discussed}.\n\n"
         "Let me know if you'd like to move forward. And feel free to reach out if you have any questions, "
         "on what I've sent or more generally on home health!\n\n"
-        "Best,\n{sender_name}\n\nCo-founder | Lightwork Home Health\n\n"
+        "Best,\n{sender_signature}\n\n"
         "If no relevant topic came up on the call, omit the tip paragraph entirely."),
     2: (3, "Social proof",
         "Use this EXACT template:\n\n"
@@ -118,7 +118,7 @@ CADENCE = {
         "did on our service. I thought you might find it interesting. "
         "Here's <a href=\"https://www.lightworkhome.com/blog-posts/wilkinson\">the link.</a>\n\n"
         "Let me know if you have any questions.\n\n"
-        "Best,\n{sender_name}\n\nCo-founder | Lightwork Home Health"),
+        "Best,\n{sender_signature}"),
     3: (6, "Key findings",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
@@ -135,7 +135,7 @@ CADENCE = {
         "We advised on the tradeoffs between kill switches, shielding paint, and other solutions.\n\n"
         "This is why our clients trust us. Our assessments uncover hidden risks and provide clear, "
         "actionable solutions tailored to each home. Shall we schedule a follow-up to go over any questions?\n\n"
-        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
+        "{sender_signature}"),
     4: (10, "Availability + Reviews",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
@@ -157,7 +157,7 @@ CADENCE = {
         "- Andrew Wilkinson, Co-founder of Tiny\n\n"
         "You can see more of our reviews <a href=\"https://www.lightworkhome.com/reviews\">here</a>.\n\n"
         "Let me know if you have any questions or would like to move forward.\n\n"
-        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
+        "{sender_signature}"),
     5: (16, "Clinical credibility",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
@@ -170,7 +170,7 @@ CADENCE = {
         "- Dr. David Boyd MD, Concierge Medicine Physician & Founder, Blindspot Medical\n\n"
         "We work closely with physicians and functional medicine practitioners who see environmental "
         "factors as a key piece of their patients' health. Happy to answer any questions.\n\n"
-        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
+        "{sender_signature}"),
     6: (25, "Graceful close",
         "Last active email. 2 sentences max. 'Just wanted to leave the door open. "
         "We're here whenever you're ready.' Do NOT include a resource or tip. Just be human."),
@@ -178,7 +178,7 @@ CADENCE = {
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
         "How's it been going with home health? Let me know if you have any questions or anything.\n\n"
-        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
+        "{sender_signature}"),
 }
 
 # Long-term nurture cadence for "Lost" leads (said not interested now).
@@ -213,7 +213,7 @@ NO_SHOW_CADENCE = {
         "No worries at all. Here's my link if you'd like to rebook: "
         "{booking_link}\n\n"
         "Feel free to reach out if you have any questions in the meantime.\n\n"
-        "Best,\n{sender_name}\n\nCo-founder | Lightwork Home Health\n\n"
+        "Best,\n{sender_signature}\n\n"
         "Keep it exactly this short. No guilt, no explanation needed."),
     2: (3, "Value drop",
         "Share ONE specific, useful home health tip based on their 'why reaching out' field or city. "
@@ -229,7 +229,7 @@ NO_SHOW_CADENCE = {
         "<a href=\"https://x.com/awilkinson\">Andrew Wilkinson</a> (co-founder of Tiny) "
         "did on our service. Here's <a href=\"https://www.lightworkhome.com/blog-posts/wilkinson\">the link.</a>\n\n"
         "Let me know if you have any questions.\n\n"
-        "Best,\n{sender_name}\n\nCo-founder | Lightwork Home Health"),
+        "Best,\n{sender_signature}"),
     4: (14, "Availability mention",
         "Mention that you'll be in their city/area soon. "
         "Frame it as a heads-up, not pressure. "
@@ -238,7 +238,7 @@ NO_SHOW_CADENCE = {
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
         "Just wanted to leave the door open. We're here whenever you're ready.\n\n"
-        "{sender_name}\n\nCo-founder | Lightwork Home Health"),
+        "{sender_signature}"),
 }
 
 # Owner booking links (Cal.com)
