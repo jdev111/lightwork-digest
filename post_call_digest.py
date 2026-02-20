@@ -87,8 +87,8 @@ OWNER_TAB_ORDER = ["Jay", "Johnny", "Dom", "Unassigned"]
 # Sender signatures by owner (used for draft sign-off).
 OWNER_SIGNATURE = {
     "Jay": "Jay\nCo-founder | Lightwork Home Health",
-    "Johnny": "Johnny\nGeneral Manager | Lightwork Home Health NYC\n310.804.1305",
-    "Dom": "Dom\nCo-founder | Lightwork Home Health",
+    "Johnny": "Johnny Bowman\nGeneral Manager, Lightwork Home Health NY\n310.804.1305",
+    "Dom": "Dom Francks\nGeneral Manager, Lightwork Home Health West Coast\n+1 (360) 951-1330",
     "Josh": "Josh\nLightwork Home Health",
     "Unassigned": "Jay\nCo-founder | Lightwork Home Health",
 }
@@ -2304,12 +2304,14 @@ IMPORTANT RULES:
     if "wilkinson" in source_lower or "andrew" in source_lower:
         referral_note = "\nIMPORTANT: This lead was referred by Andrew Wilkinson. Do NOT include the Wilkinson write-up, Wilkinson blog post, Wilkinson testimonial, or any Andrew Wilkinson reference. They already know him and have likely read it. Use a different resource instead."
 
-    # Johnny's emails occasionally include WhatsApp line
-    johnny_note = ""
+    # Johnny and Dom's emails occasionally include WhatsApp line
+    phone_note = ""
     if sender == "Johnny":
-        johnny_note = "\nIn some emails (not all), naturally include this line: 'Always feel free to text/WhatsApp me at 310.804.1305 with any questions or home health interests as well.'"
+        phone_note = "\nIn some emails (not all), naturally include this line: 'Always feel free to text/WhatsApp me at 310.804.1305 with any questions or home health interests as well.'"
+    elif sender == "Dom":
+        phone_note = "\nIn some emails (not all), naturally include this line: 'Always feel free to text/WhatsApp me at +1 (360) 951-1330 with any questions or home health interests as well.'"
 
-    user_prompt = f"""CADENCE TYPE: {message_mode}{nurture_note}{no_show_note}{referral_note}{johnny_note}
+    user_prompt = f"""CADENCE TYPE: {message_mode}{nurture_note}{no_show_note}{referral_note}{phone_note}
 
 THIS IS FOLLOW-UP #{fu_number} ({fu_type})
 Scheduled for Day {day_offset} after the call.
