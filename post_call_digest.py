@@ -88,7 +88,7 @@ OWNER_TAB_ORDER = ["Jay", "Johnny", "Dom", "Unassigned"]
 OWNER_SIGNATURE = {
     "Jay": "Jay\nCo-founder | Lightwork Home Health",
     "Johnny": "Johnny Bowman\nGeneral Manager, Lightwork Home Health NY\n310.804.1305",
-    "Dom": "Dom Francks\nGeneral Manager, Lightwork Home Health West Coast\n+1 (360) 951-1330",
+    "Dom": "Dom Francks\nGeneral Manager, Lightwork Home Health West Coast\n360.951.1330",
     "Josh": "Josh\nLightwork Home Health",
     "Unassigned": "Jay\nCo-founder | Lightwork Home Health",
 }
