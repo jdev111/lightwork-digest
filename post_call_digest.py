@@ -249,6 +249,9 @@ OWNER_BOOKING_LINK = {
     "Josh": "https://cal.com/josh-ruben-1q4w0b/lightwork-home-health-test-call",
 }
 
+# Lead statuses that should be excluded from the digest entirely
+SKIP_LEAD_STATUSES = {"unqualified", "not interested"}
+
 # Opportunity statuses that put a lead into nurture instead of active cadence
 NURTURE_OPP_STATUSES = {"lost"}
 
@@ -1057,6 +1060,12 @@ def get_recent_customer_leads(all_meetings=None):
 
         display_name = (lead_details.get("display_name") or "").lower()
         if "testing" in display_name:
+            continue
+
+        # Skip leads with unqualified/not interested status
+        lead_status = (lead_details.get("status_label") or "").lower().strip()
+        if lead_status in SKIP_LEAD_STATUSES:
+            print(f"  Skipping {lead_details.get('display_name', '')} (lead status: {lead_status})")
             continue
 
         # Check opportunity status
