@@ -43,6 +43,14 @@ ALLOWED_RECIPIENTS = {
     "dom@lightworkhome.com",
 }
 
+# Map first name to email for per-person notifications
+OWNER_NAME_TO_EMAIL = {
+    "Jay": "jay@lightworkhome.com",
+    "Johnny": "johnny@lightworkhome.com",
+    "Dom": "dom@lightworkhome.com",
+    "Josh": "jay@lightworkhome.com",  # Josh's missing transcripts go to Jay
+}
+
 
 def load_env(path):
     if not path.exists():
@@ -476,9 +484,26 @@ def main(dry_run=False):
     for m in customer_meetings:
         title = m.get("title", "Untitled")
         lead_id = m.get("lead_id", "")
-        user_id = m.get("user_id", "")
-        owner_name = user_map.get(user_id, "Unknown")
-        owner_first = owner_name.split()[0] if owner_name else "Unknown"
+        # Find which team member attended (for per-person notifications)
+        owner_email = ""
+        for a in m.get("attendees", []):
+            email = (a.get("email") or "").lower()
+            if email in TEAM_EMAILS:
+                owner_email = email
+                break
+
+        # Derive owner name from attendee email, fall back to Close user_id
+        TEAM_EMAIL_TO_NAME = {
+            "jay@lightworkhome.com": "Jay",
+            "johnny@lightworkhome.com": "Johnny",
+            "dom@lightworkhome.com": "Dom",
+            "josh@lightworkhome.com": "Josh",
+        }
+        owner_first = TEAM_EMAIL_TO_NAME.get(owner_email, "")
+        if not owner_first:
+            user_id = m.get("user_id", "")
+            owner_name = user_map.get(user_id, "Unknown")
+            owner_first = owner_name.split()[0] if owner_name else "Unknown"
         lead_info = lead_cache.get(lead_id, {})
         lead_name = lead_info.get("display_name", "Unknown")
         close_url = lead_info.get("html_url", "")
@@ -526,6 +551,7 @@ def main(dry_run=False):
         all_calls.append({
             "date": date_str,
             "owner": owner_first,
+            "owner_email": owner_email,
             "lead_name": lead_name,
             "title": title,
             "close_url": close_url,
@@ -536,30 +562,44 @@ def main(dry_run=False):
     status_order = {"missing": 0, "no_show": 1, "cancelled": 2, "matched": 3}
     all_calls.sort(key=lambda c: (status_order.get(c["call_status"], 99), c["date"]))
 
-    # 6. Build report
-    # Only count calls that should have transcripts (exclude cancelled/no-show)
-    actionable_count = sum(1 for c in all_calls if c["call_status"] in ("matched", "missing"))
-    missing_count = actionable_count - matched_count
-    total_count = len(customer_meetings)
-    html = build_report_html(all_calls, matched_count, missing_count, week_start, week_end)
+    # 6. Check for missing transcripts
+    missing_calls = [c for c in all_calls if c["call_status"] == "missing"]
 
-    subject = f"Daily Transcript Report - {week_start.strftime('%b %-d')} ({missing_count} missing, {matched_count} matched)"
-
-    if dry_run:
-        output_path = SCRIPT_DIR / "missing_transcripts_preview.html"
-        output_path.write_text(html)
-        print(f"\n{'=' * 60}")
-        print(f"DRY RUN: Report saved to {output_path}")
-        print(f"  {matched_count}/{total_count} calls matched")
-        print(f"  {missing_count} calls missing transcripts")
-        print(f"Open with: open '{output_path}'")
+    if not missing_calls:
+        print("\nNo missing transcripts. No emails to send.")
         return
 
-    # 7. Send
-    recipients = [r.strip() for r in DIGEST_TO.split(",") if r.strip()]
-    print(f"\nSending report to {', '.join(recipients)}...")
-    send_report(html, subject, recipients)
-    print(f"Done. {missing_count} missing, {matched_count} matched out of {total_count}.")
+    # Group missing calls by owner email
+    from collections import defaultdict
+    missing_by_owner = defaultdict(list)
+    for c in missing_calls:
+        email = c.get("owner_email", "")
+        if email and email in ALLOWED_RECIPIENTS:
+            missing_by_owner[email].append(c)
+        else:
+            # Fallback: send to Jay if owner unknown
+            missing_by_owner["jay@lightworkhome.com"].append(c)
+
+    print(f"\n{len(missing_calls)} missing transcript(s) across {len(missing_by_owner)} team member(s)")
+
+    if dry_run:
+        for owner_email, calls in missing_by_owner.items():
+            owner_name = calls[0]["owner"]
+            html = build_report_html(calls, 0, len(calls), week_start, week_end)
+            output_path = SCRIPT_DIR / f"missing_transcripts_preview_{owner_name}.html"
+            output_path.write_text(html)
+            print(f"DRY RUN: {owner_name}'s report saved to {output_path} ({len(calls)} missing)")
+        return
+
+    # 7. Send individual emails to each team member with their missing calls
+    for owner_email, calls in missing_by_owner.items():
+        owner_name = calls[0]["owner"]
+        html = build_report_html(calls, 0, len(calls), week_start, week_end)
+        subject = f"Missing Transcript{'s' if len(calls) > 1 else ''} - {week_start.strftime('%b %-d')} ({len(calls)} call{'s' if len(calls) > 1 else ''})"
+        print(f"\nSending to {owner_email} ({len(calls)} missing)...")
+        send_report(html, subject, [owner_email])
+
+    print(f"\nDone. Notified {len(missing_by_owner)} team member(s) about {len(missing_calls)} missing transcript(s).")
 
 
 if __name__ == "__main__":
