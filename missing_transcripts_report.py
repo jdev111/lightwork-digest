@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Weekly Missing Transcripts Report
+Daily Missing Transcripts Report
 
-Compares the past 7 days of customer calls from Close.com against the
+Compares yesterday's customer calls from Close.com against the
 local Granola cache. Any call without a matching transcript is flagged.
-Sends a summary email to jay@lightworkhome.com every Monday.
+Sends a summary email to jay@lightworkhome.com every morning.
 
 Uses the same .env and Close.com API as post_call_digest.py.
 """
@@ -37,7 +37,11 @@ TEAM_EMAILS = {
     "josh@lightworkhome.com",
 }
 
-ALLOWED_RECIPIENT = "jay@lightworkhome.com"
+ALLOWED_RECIPIENTS = {
+    "jay@lightworkhome.com",
+    "johnny@lightworkhome.com",
+    "dom@lightworkhome.com",
+}
 
 
 def load_env(path):
@@ -56,10 +60,10 @@ load_env(ENV_PATH)
 
 CLOSE_API_KEY = os.environ.get("CLOSE_API_KEY", "")
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
-DIGEST_TO = os.environ.get("DIGEST_TO", ALLOWED_RECIPIENT)
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+DIGEST_TO = os.environ.get("DIGEST_TO", ",".join(ALLOWED_RECIPIENTS))
 GRANOLA_CACHE = os.environ.get(
     "GRANOLA_CACHE",
     str(Path.home() / "Library/Application Support/Granola/cache-v3.json"),
@@ -289,9 +293,9 @@ def _extract_text_from_prosemirror(node):
 # ---------------------------------------------------------------------------
 
 
-def build_report_html(all_calls, matched_count, total_count, week_start, week_end):
+def build_report_html(all_calls, matched_count, missing_count, week_start, week_end):
     """Build the HTML email showing all calls with transcript status."""
-    missing_count = total_count - matched_count
+    total_count = matched_count + missing_count
     date_range = f"{week_start.strftime('%b %-d')} - {week_end.strftime('%b %-d, %Y')}"
 
     if missing_count == 0:
@@ -335,7 +339,7 @@ def build_report_html(all_calls, matched_count, total_count, week_start, week_en
 <head><meta charset="utf-8"></head>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; max-width:750px; margin:0 auto; padding:20px; background:#FFFCF0; color:#1a1a1a;">
   <div style="text-align:center; padding:16px 0; border-bottom:2px solid #2E5B88; margin-bottom:20px;">
-    <h1 style="margin:0; font-size:22px; color:#1a1a1a;">Weekly Transcript Report</h1>
+    <h1 style="margin:0; font-size:22px; color:#1a1a1a;">Daily Transcript Report</h1>
     <p style="margin:4px 0 0 0; color:#666; font-size:14px;">{date_range}</p>
   </div>
 
@@ -370,7 +374,7 @@ def build_report_html(all_calls, matched_count, total_count, week_start, week_en
   </div>
 
   <div style="text-align:center; padding:20px 0; margin-top:30px; border-top:1px solid #ddd; color:#999; font-size:12px;">
-    Auto-generated weekly by Lightwork Digest.
+    Auto-generated daily by Lightwork Digest.
   </div>
 </body>
 </html>"""
@@ -381,24 +385,29 @@ def build_report_html(all_calls, matched_count, total_count, week_start, week_en
 # ---------------------------------------------------------------------------
 
 
-def send_report(html_body, subject, recipient):
-    if recipient.lower() != ALLOWED_RECIPIENT:
-        raise RuntimeError(
-            f"SAFETY: Refusing to send to {recipient}. Only {ALLOWED_RECIPIENT} is allowed."
-        )
+def send_report(html_body, subject, recipients):
+    """Send report to one or more recipients. All must be in ALLOWED_RECIPIENTS."""
+    if isinstance(recipients, str):
+        recipients = [recipients]
+
+    for r in recipients:
+        if r.lower() not in ALLOWED_RECIPIENTS:
+            raise RuntimeError(
+                f"SAFETY: Refusing to send to {r}. Only {ALLOWED_RECIPIENTS} are allowed."
+            )
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = SMTP_USER
-    msg["To"] = recipient
+    msg["From"] = SMTP_EMAIL
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html"))
 
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context) as server:
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, [recipient], msg.as_string())
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.sendmail(SMTP_EMAIL, recipients, msg.as_string())
 
-    print(f"Report sent to {recipient}")
+    print(f"Report sent to {', '.join(recipients)}")
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +418,7 @@ def send_report(html_body, subject, recipient):
 def main(dry_run=False):
     now = datetime.now(timezone.utc)
     week_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = week_end - timedelta(days=7)
+    week_start = week_end - timedelta(days=1)
 
     print(f"Missing Transcripts Report")
     print(f"Checking: {week_start.strftime('%b %-d')} - {week_end.strftime('%b %-d, %Y')}")
@@ -495,7 +504,7 @@ def main(dry_run=False):
         has_transcript = False
         if not is_cancelled and not no_show and granola_docs:
             granola_match = match_granola(m, granola_docs)
-            if granola_match:
+            if granola_match and has_granola_content(granola_match, granola_transcripts):
                 has_transcript = True
                 matched_count += 1
 
@@ -528,11 +537,13 @@ def main(dry_run=False):
     all_calls.sort(key=lambda c: (status_order.get(c["call_status"], 99), c["date"]))
 
     # 6. Build report
+    # Only count calls that should have transcripts (exclude cancelled/no-show)
+    actionable_count = sum(1 for c in all_calls if c["call_status"] in ("matched", "missing"))
+    missing_count = actionable_count - matched_count
     total_count = len(customer_meetings)
-    missing_count = total_count - matched_count
-    html = build_report_html(all_calls, matched_count, total_count, week_start, week_end)
+    html = build_report_html(all_calls, matched_count, missing_count, week_start, week_end)
 
-    subject = f"Weekly Transcript Report - {week_start.strftime('%b %-d')} to {week_end.strftime('%b %-d')} ({missing_count} missing, {matched_count} matched)"
+    subject = f"Daily Transcript Report - {week_start.strftime('%b %-d')} ({missing_count} missing, {matched_count} matched)"
 
     if dry_run:
         output_path = SCRIPT_DIR / "missing_transcripts_preview.html"
@@ -545,8 +556,9 @@ def main(dry_run=False):
         return
 
     # 7. Send
-    print(f"\nSending report to {DIGEST_TO}...")
-    send_report(html, subject, DIGEST_TO)
+    recipients = [r.strip() for r in DIGEST_TO.split(",") if r.strip()]
+    print(f"\nSending report to {', '.join(recipients)}...")
+    send_report(html, subject, recipients)
     print(f"Done. {missing_count} missing, {matched_count} matched out of {total_count}.")
 
 
