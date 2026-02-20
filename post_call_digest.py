@@ -207,33 +207,38 @@ NURTURE_CADENCE = {
 
 # No-show / canceled meeting cadence (rebook-focused, 5 touches)
 NO_SHOW_CADENCE = {
-    1: (1, "Acknowledge + reschedule",
+    1: (1, "Acknowledge + rebook",
+        "Write a short, warm email acknowledging that the call didn't happen. "
+        "Reference the specific meeting context (e.g., 'I saw we missed each other for our call' or "
+        "'Totally understand things come up'). Do NOT just say 'no worries.' "
+        "Make it clear you noticed and you're easy to reschedule with. "
+        "Include the booking link: {booking_link}\n\n"
+        "Sign off with:\n{sender_signature}\n\n"
+        "3-4 sentences max. No guilt, but do acknowledge the cancellation/no-show directly."),
+    2: (3, "Presentation deck",
+        "Send the presentation deck. Keep it casual and helpful.\n\n"
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
-        "No worries at all. Here's my link if you'd like to rebook: "
-        "{booking_link}\n\n"
-        "Feel free to reach out if you have any questions in the meantime.\n\n"
-        "Best,\n{sender_signature}\n\n"
-        "Keep it exactly this short. No guilt, no explanation needed."),
-    2: (3, "Value drop",
-        "Share ONE specific, useful home health tip based on their 'why reaching out' field or city. "
-        "Solve a small problem that reveals a bigger one. "
-        "Do NOT mention rescheduling. Do NOT mention the missed call. "
-        "Just deliver value as if you're helping a friend. "
-        "End with a soft one-liner like 'Happy to chat more about this whenever.' "
-        "2-3 sentences max."),
-    3: (7, "Social proof",
+        "Wanted to send over our presentation deck in case it's helpful. "
+        "It covers what we test, how the process works, and what our clients typically find.\n\n"
+        "Here's my link if you'd like to rebook a call: {booking_link}\n\n"
+        "{sender_signature}"),
+    3: (7, "Andrew Wilkinson write-up",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
         "Wanted to share this recent write-up that "
         "<a href=\"https://x.com/awilkinson\">Andrew Wilkinson</a> (co-founder of Tiny) "
         "did on our service. Here's <a href=\"https://www.lightworkhome.com/blog-posts/wilkinson\">the link.</a>\n\n"
-        "Let me know if you have any questions.\n\n"
-        "Best,\n{sender_signature}"),
-    4: (14, "Availability mention",
-        "Mention that you'll be in their city/area soon. "
-        "Frame it as a heads-up, not pressure. "
-        "2 sentences max. No tip, no resource."),
+        "Let me know if you'd like to rebook a call: {booking_link}\n\n"
+        "{sender_signature}"),
+    4: (14, "Example report",
+        "Use this EXACT template:\n\n"
+        "Hey {first_name},\n\n"
+        "Thought you might find this useful. Here's an "
+        "<a href=\"https://www.lightworkhome.com/examplereport\">example report</a> "
+        "(password: homehealth) so you can see exactly what we deliver.\n\n"
+        "Happy to jump on a call whenever works for you: {booking_link}\n\n"
+        "{sender_signature}"),
     5: (30, "Graceful close",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
@@ -433,8 +438,8 @@ MAX_EXCLAMATIONS = 1
 # These are soft caps; if exceeded we rewrite to be tighter.
 MAX_SENTENCES_BY_FU = {1: 8, 2: 6, 3: 15, 4: 20, 5: 6, 6: 3, 7: 3}
 MAX_WORDS_BY_FU = {1: 170, 2: 120, 3: 300, 4: 400, 5: 130, 6: 60, 7: 40}
-NO_SHOW_MAX_SENTENCES_BY_FU = {1: 4, 2: 4, 3: 4, 4: 3, 5: 2}
-NO_SHOW_MAX_WORDS_BY_FU = {1: 60, 2: 80, 3: 80, 4: 50, 5: 30}
+NO_SHOW_MAX_SENTENCES_BY_FU = {1: 4, 2: 5, 3: 5, 4: 5, 5: 2}
+NO_SHOW_MAX_WORDS_BY_FU = {1: 80, 2: 80, 3: 80, 4: 80, 5: 30}
 
 # ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
