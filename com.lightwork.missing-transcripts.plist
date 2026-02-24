@@ -6,7 +6,7 @@
     <string>com.lightwork.missing-transcripts</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/opt/homebrew/bin/python3</string>
         <string>/Users/dillandevram/Desktop/claude-projects/lightwork-digest/missing_transcripts_report.py</string>
     </array>
     <key>StartCalendarInterval</key>
