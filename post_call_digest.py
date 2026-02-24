@@ -2020,7 +2020,7 @@ def _send_owner_reminders(action_items_by_owner, date_str):
         for item in items:
             name = html_mod.escape(item.get("name", ""))
             fu = item.get("fu_number", "?")
-            draft = html_mod.escape(item.get("copy_draft", ""))
+            draft = item.get("copy_draft", "")
             no_show_badge = ' <span style="color:#c0392b;">[NO-SHOW]</span>' if item.get("no_show") else ""
             overdue_badge = ' <span style="color:#E67E22;">[OVERDUE]</span>' if item.get("overdue") else ""
 
