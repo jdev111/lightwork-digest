@@ -99,7 +99,8 @@ OWNER_SIGNATURE = {
 # Key = FU number, Value = (day_offset, type_label, claude_instructions)
 CADENCE = {
     1: (1, "Post-call recap + tip",
-        "Use this template, inserting a personalized tip from the sales scripts based on the call:\n\n"
+        "Use this template, inserting a personalized tip from the sales scripts based on the call.\n"
+        "IMPORTANT: Keep each paragraph as its own block separated by a blank line. Do NOT merge paragraphs into one block.\n\n"
         "Hey {first_name},\n\n"
         "Pleasure speaking with you today! Thanks for reaching out.\n\n"
         "A couple followup items: here's an <a href=\"https://www.lightworkhome.com/examplereport\">example report</a> "
@@ -2306,7 +2307,7 @@ ALLOWED LINK PREFIXES (only include links that start with one of these):
 IMPORTANT RULES:
 - BREVITY IS KING. Most emails should be 2-4 sentences. Only FU1 can be longer (up to 6 sentences).
 - Do NOT force a tip or resource into every email. If the cadence step says "no tip," write a clean, short follow-up without one.
-- Never say "home health assessment" or "assessment."
+- You can say "the assessment" but never say "home health assessment."
 - When mentioning the example report, always hyperlink it: <a href="https://www.lightworkhome.com/examplereport">example report</a> (password: homehealth)
 - Do NOT imply anything is scheduled or confirmed unless the transcript explicitly confirms it.
 - Do NOT use "today" or "yesterday" unless the call was within the last 2 days.
@@ -2316,7 +2317,8 @@ IMPORTANT RULES:
 - Do NOT repeat ANY resource or talking point from prior emails.
 - Vary your openings. Not every email should start "Hey {{name}}, [reference to call]."
 - Use the lead's first name ("{first_name}") in the greeting, not their full name.
-- LINKS: Only use links from the allowlist above."""
+- LINKS: Only use links from the allowlist above.
+- FORMATTING: Each paragraph MUST be separated by a blank line. Never merge multiple paragraphs into one block of text. The greeting, each body paragraph, the CTA, and the signature should each be their own block."""
 
     # ---------------------------------------------------------------
     # User message: per-lead context
