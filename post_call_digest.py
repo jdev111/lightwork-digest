@@ -106,14 +106,14 @@ CADENCE = {
         "(password: homehealth), and attached is the deck I presented with additional information.\n\n"
         "Also, since you mentioned {topic from call}, one thing worth noting: {one specific actionable tip "
         "from the sales scripts that matches what they discussed}.\n\n"
-        "Let me know if you'd like to move forward. And feel free to reach out if you have any questions, "
+        "Let me know if you'd like to move forward with the assessment. And feel free to reach out if you have any questions, "
         "on what I've sent or more generally on home health!\n\n"
         "Best,\n{sender_signature}\n\n"
         "If no relevant topic came up on the call, omit the tip paragraph entirely."),
     2: (3, "Social proof",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
-        "Hope you're doing well! Just wanted to check if you'd like to move forward.\n\n"
+        "Hope you're doing well! Just wanted to check if you'd like to move forward with the assessment.\n\n"
         "Also wanted to share this recent write-up that "
         "<a href=\"https://x.com/awilkinson\">Andrew Wilkinson</a> (co-founder of Tiny) "
         "did on our service. I thought you might find it interesting. "
@@ -157,7 +157,7 @@ CADENCE = {
         "my family's health, and then helped us get everything resolved. We made the changes right away. Highly recommend.\" "
         "- Andrew Wilkinson, Co-founder of Tiny\n\n"
         "You can see more of our reviews <a href=\"https://www.lightworkhome.com/reviews\">here</a>.\n\n"
-        "Let me know if you have any questions or would like to move forward.\n\n"
+        "Let me know if you have any questions or would like to move forward with the assessment.\n\n"
         "{sender_signature}"),
     5: (16, "Clinical credibility",
         "Use this EXACT template:\n\n"
@@ -2020,7 +2020,28 @@ def _send_owner_reminders(action_items_by_owner, date_str):
         for item in items:
             name = html_mod.escape(item.get("name", ""))
             fu = item.get("fu_number", "?")
-            draft = item.get("copy_draft", "")
+            draft_raw = item.get("copy_draft", "")
+            # Convert plain text draft to copy-paste-friendly HTML:
+            # - Lines starting with "- " become <li> items
+            # - Other newlines become <br>
+            draft_lines = draft_raw.split("\n")
+            draft_html_parts = []
+            in_list = False
+            for dl in draft_lines:
+                stripped = dl.strip()
+                if stripped.startswith("- "):
+                    if not in_list:
+                        draft_html_parts.append("<ul style='margin:8px 0; padding-left:20px;'>")
+                        in_list = True
+                    draft_html_parts.append(f"<li>{stripped[2:]}</li>")
+                else:
+                    if in_list:
+                        draft_html_parts.append("</ul>")
+                        in_list = False
+                    draft_html_parts.append(dl + "<br>" if stripped else "<br>")
+            if in_list:
+                draft_html_parts.append("</ul>")
+            draft = "\n".join(draft_html_parts)
             no_show_badge = ' <span style="color:#c0392b;">[NO-SHOW]</span>' if item.get("no_show") else ""
             overdue_badge = ' <span style="color:#E67E22;">[OVERDUE]</span>' if item.get("overdue") else ""
 
@@ -2069,7 +2090,7 @@ def _send_owner_reminders(action_items_by_owner, date_str):
             leads_html += f"""
             <div style="border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px; background:#fff;">
               <h3 style="margin:0 0 8px 0; color:#2E5B88;">{name} (FU #{fu}){no_show_badge}{overdue_badge}{close_link}</h3>
-              <div style="background:#f9f9f9; border-left:3px solid #2E5B88; padding:12px; white-space:pre-wrap; font-family:sans-serif; font-size:14px; line-height:1.6; color:#333;">{draft}</div>
+              <div style="background:#f9f9f9; border-left:3px solid #2E5B88; padding:12px; font-family:sans-serif; font-size:14px; line-height:1.6; color:#333;">{draft}</div>
               {call_summary_html}
               {prior_emails_html}
             </div>"""
