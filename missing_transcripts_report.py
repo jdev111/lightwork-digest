@@ -71,7 +71,6 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-DIGEST_TO = os.environ.get("DIGEST_TO", ",".join(ALLOWED_RECIPIENTS))
 GRANOLA_CACHE = os.environ.get(
     "GRANOLA_CACHE",
     str(Path.home() / "Library/Application Support/Granola/cache-v3.json"),
@@ -89,20 +88,35 @@ def _request(method, url, headers=None, body=None, basic_auth=None):
         body = json.dumps(body).encode()
         headers.setdefault("Content-Type", "application/json")
 
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    auth_header = None
     if basic_auth:
         import base64
         cred = base64.b64encode(f"{basic_auth[0]}:{basic_auth[1]}".encode()).decode()
-        req.add_header("Authorization", f"Basic {cred}")
+        auth_header = f"Basic {cred}"
 
     ctx = ssl.create_default_context()
-    try:
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode() if e.fp else ""
-        print(f"HTTP {e.code} for {url}: {error_body[:300]}")
-        raise
+    import time as _time
+    transient_codes = {400, 408, 425, 429, 500, 502, 503, 504}
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        req = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
+        if auth_header:
+            req.add_header("Authorization", auth_header)
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode() if e.fp else ""
+            if e.code in transient_codes and attempt < max_attempts:
+                _time.sleep(5 * attempt)
+                continue
+            print(f"HTTP {e.code} for {url}: {error_body[:300]}")
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError, ssl.SSLError):
+            if attempt < max_attempts:
+                _time.sleep(5 * attempt)
+                continue
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -410,12 +424,14 @@ def send_report(html_body, subject, recipients):
     msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html"))
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SMTP_EMAIL, SMTP_PASSWORD)
-        server.sendmail(SMTP_EMAIL, recipients, msg.as_string())
-
-    print(f"Report sent to {', '.join(recipients)}")
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            server.sendmail(SMTP_EMAIL, recipients, msg.as_string())
+        print(f"Report sent to {', '.join(recipients)}")
+    except Exception as e:
+        print(f"Error sending to {', '.join(recipients)}: {e}")
 
 
 # ---------------------------------------------------------------------------

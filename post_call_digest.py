@@ -1982,9 +1982,10 @@ def _save_transcript(conn, meeting_id, transcript_text="", meeting_notes="", sou
 
 # SAFETY: Only these addresses can receive reminder emails. Never send
 # to leads, prospects, or any address outside this allowlist.
-# TODO: Add johnny@lightworkhome.com and dom@lightworkhome.com when ready
 ALLOWED_RECIPIENT_EMAILS = {
     "jay@lightworkhome.com",
+    "johnny@lightworkhome.com",
+    "dom@lightworkhome.com",
 }
 
 
