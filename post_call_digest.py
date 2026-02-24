@@ -1074,9 +1074,10 @@ def get_recent_customer_leads(all_meetings=None):
         if "testing" in display_name:
             continue
 
-        # Skip leads with unqualified/not interested status
+        # Skip leads with unqualified/not interested status (substring match
+        # because Close.com uses combined labels like "Unqualified / Not Interested")
         lead_status = (lead_details.get("status_label") or "").lower().strip()
-        if lead_status in SKIP_LEAD_STATUSES:
+        if any(s in lead_status for s in SKIP_LEAD_STATUSES):
             print(f"  Skipping {lead_details.get('display_name', '')} (lead status: {lead_status})")
             continue
 
