@@ -2064,9 +2064,11 @@ def _send_owner_reminders(action_items_by_owner, date_str):
                   {email_items}
                 </div>"""
 
+            close_url = item.get("close_url", "")
+            close_link = f' <a href="{close_url}" style="color:#2E5B88; font-size:13px; font-weight:normal;">[Close]</a>' if close_url else ""
             leads_html += f"""
             <div style="border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px; background:#fff;">
-              <h3 style="margin:0 0 8px 0; color:#2E5B88;">{name} (FU #{fu}){no_show_badge}{overdue_badge}</h3>
+              <h3 style="margin:0 0 8px 0; color:#2E5B88;">{name} (FU #{fu}){no_show_badge}{overdue_badge}{close_link}</h3>
               <div style="background:#f9f9f9; border-left:3px solid #2E5B88; padding:12px; white-space:pre-wrap; font-family:sans-serif; font-size:14px; line-height:1.6; color:#333;">{draft}</div>
               {call_summary_html}
               {prior_emails_html}
