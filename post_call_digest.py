@@ -3486,7 +3486,7 @@ def main():
     if GRANOLA_MCP_ENABLE:
         try:
             print("\nConnecting to Granola MCP...")
-            mcp_client = GranolaMCPClient(enable_interactive_login=True)
+            mcp_client = GranolaMCPClient(enable_interactive_login=False)
             mcp_client.initialize()
             mcp_meetings = mcp_list_meetings(mcp_client, since, now)
             print(f"  {len(mcp_meetings)} meetings from MCP (last {CADENCE_LOOKBACK_DAYS} days)")
