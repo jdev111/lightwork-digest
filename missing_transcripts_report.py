@@ -442,7 +442,7 @@ def send_report(html_body, subject, recipients):
 def main(dry_run=False):
     now = datetime.now(timezone.utc)
     week_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = week_end - timedelta(days=1)
+    week_start = week_end - timedelta(days=3)
 
     print(f"Missing Transcripts Report")
     print(f"Checking: {week_start.strftime('%b %-d')} - {week_end.strftime('%b %-d, %Y')}")
