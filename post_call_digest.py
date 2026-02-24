@@ -141,9 +141,8 @@ CADENCE = {
     4: (10, "Availability + Reviews",
         "Use this EXACT template:\n\n"
         "Hey {first_name},\n\n"
-        "Just wanted to flag that we have some availability in {city} on {available_dates}, "
-        "in case that works for you. As a reminder, the total quote was "
-        "for {quote_amount} (including {referrer_name}'s {discount_percentage}% discount).\n\n"
+        "Just wanted to flag that we have some availability in [CITY/DATES], "
+        "in case that works for you.\n\n"
         "Below are some of our reviews which gives a nice insight into the value our clients get from the service.\n\n"
         "\"Incredible service. After living in a house that nearly killed me, these guys were literally lifesavers.\" "
         "- Chris Williamson, Host of Modern Wisdom podcast\n\n"
