@@ -35,6 +35,7 @@ import base64
 import hashlib
 import secrets
 import threading
+import http.client
 import http.server
 import socket
 import urllib.request
@@ -489,7 +490,8 @@ def _request(method, url, headers=None, body=None, basic_auth=None):
                 continue
             print(f"HTTP {e.code} for {url}: {error_body[:300]}")
             raise
-        except (urllib.error.URLError, TimeoutError, ConnectionResetError, ssl.SSLError):
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError,
+                ssl.SSLError, http.client.IncompleteRead):
             if attempt < max_attempts:
                 time.sleep(RETRY_BACKOFF_FACTOR * attempt)
                 continue
