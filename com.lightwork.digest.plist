@@ -7,14 +7,12 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/python3</string>
-        <string>/Users/dillandevram/Desktop/claude-projects/lightwork-digest/post_call_digest.py</string>
+        <string>/bin/bash</string>
+        <string>/Users/dillandevram/Desktop/claude-projects/lightwork-digest/run_digest.sh</string>
     </array>
 
     <key>StartCalendarInterval</key>
     <dict>
-        <key>Hour</key>
-        <integer>8</integer>
         <key>Minute</key>
         <integer>0</integer>
     </dict>
