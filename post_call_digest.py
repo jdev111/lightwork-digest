@@ -442,8 +442,8 @@ FORBIDDEN_TONE_MARKERS = [
 
 MAX_EXCLAMATIONS = 1
 # These are soft caps; if exceeded we rewrite to be tighter.
-MAX_SENTENCES_BY_FU = {1: 8, 2: 6, 3: 15, 4: 20, 5: 6, 6: 3, 7: 3}
-MAX_WORDS_BY_FU = {1: 170, 2: 120, 3: 300, 4: 400, 5: 130, 6: 60, 7: 40}
+MAX_SENTENCES_BY_FU = {1: 8, 2: 6, 3: 15, 4: 20, 5: 20, 6: 3, 7: 3}
+MAX_WORDS_BY_FU = {1: 170, 2: 120, 3: 300, 4: 400, 5: 350, 6: 60, 7: 40}
 NO_SHOW_MAX_SENTENCES_BY_FU = {1: 4, 2: 5, 3: 5, 4: 5, 5: 2}
 NO_SHOW_MAX_WORDS_BY_FU = {1: 80, 2: 80, 3: 80, 4: 80, 5: 30}
 
@@ -1214,10 +1214,14 @@ def get_followup_history(lead_id, first_call_date, debug=False):
                 email_date = e.get("date_created", "")
                 email_day = email_date[:10]
                 call_day = first_call_date.strftime("%Y-%m-%d")
-                # Skip assessment emails always
-                if "assessment" in subj_lower:
+                # Skip the original assessment proposal email, but count
+                # replies (Re:) in the same thread as follow-ups since the
+                # team often continues the conversation in that thread.
+                is_assessment_thread = "assessment" in subj_lower
+                is_reply = subj_lower.startswith("re:") or subj_lower.startswith("fwd:")
+                if is_assessment_thread and not is_reply:
                     if debug:
-                        print(f"    [SKIP] {subject} (contains 'assessment')")
+                        print(f"    [SKIP] {subject} (original assessment email)")
                     continue
                 # Skip the original scheduling/booking confirmation, but
                 # count replies (Re:) in the same thread as follow-ups.
@@ -1229,7 +1233,6 @@ def get_followup_history(lead_id, first_call_date, debug=False):
                         "partner call between", "intro call between",
                     )
                 )
-                is_reply = subj_lower.startswith("re:") or subj_lower.startswith("fwd:")
                 if is_scheduling_thread and not is_reply:
                     if debug:
                         print(f"    [SKIP] {subject} (original scheduling email)")
