@@ -1098,8 +1098,10 @@ def get_recent_customer_leads(all_meetings=None):
             print(f"  Skipping {lead_details.get('display_name', '')} (won opportunity)")
             continue
 
-        # Owner = the team member who attended the call
-        owner_name = _get_owner_from_meetings(info["meetings"])
+        # Owner: prefer Close.com custom "Owner" field; fall back to meeting attendee
+        close_owner = _get_owner_from_close(lead_details)
+        meeting_owner = _get_owner_from_meetings(info["meetings"])
+        owner_name = close_owner or meeting_owner
 
         result[lead_id] = {
             "lead_info": lead_details,
@@ -1146,6 +1148,24 @@ def _get_owner_from_meetings(meetings):
             if email in TEAM_EMAIL_TO_NAME:
                 return TEAM_EMAIL_TO_NAME[email]
     return "Unassigned"
+
+
+# Valid owner names (values from TEAM_EMAIL_TO_NAME)
+_VALID_OWNERS = set(TEAM_EMAIL_TO_NAME.values())
+
+
+def _get_owner_from_close(lead_details):
+    """Get lead owner from Close.com custom 'Owner' field.
+
+    Returns the owner name (e.g. 'Dom') if it matches a known team member,
+    or None so the caller can fall back to meeting-based assignment.
+    """
+    owner_list = lead_details.get("custom", {}).get("Owner", [])
+    if owner_list:
+        name = owner_list[0].strip()
+        if name in _VALID_OWNERS:
+            return name
+    return None
 
 
 # Opportunity statuses that mean the lead already bought the service.
@@ -3482,13 +3502,19 @@ def main():
         # Only flag as no-show if the latest no-show meeting is more recent
         # than the latest completed meeting for this lead.
         latest_completed = max(
-            (m.get("starts_at", "") for m in info["meetings"]), default=""
+            (m.get("starts_at", "") for m in info["meetings"]
+             if (m.get("status") or "").lower().strip() not in NO_SHOW_STATUSES),
+            default=""
         )
         latest_no_show = no_show_by_lead.get(lead_id, "")
         info["no_show"] = bool(latest_no_show and latest_no_show > latest_completed)
         # Override cadence_type for no-show leads (unless already nurture)
         if info["no_show"] and info.get("cadence_type") != "nurture":
             info["cadence_type"] = "no_show"
+            lead_name = info.get("lead_info", {}).get("display_name", lead_id)
+            print(f"  Flagged as no-show: {lead_name} "
+                  f"(latest_completed={latest_completed or 'none'}, "
+                  f"latest_no_show={latest_no_show})")
 
     # 2. Load Granola transcripts early so the tracker can show transcript status.
     # Prefer Granola MCP (authoritative transcripts), then fall back to Sheet/local cache.
