@@ -442,10 +442,10 @@ FORBIDDEN_TONE_MARKERS = [
 
 MAX_EXCLAMATIONS = 1
 # These are soft caps; if exceeded we rewrite to be tighter.
-MAX_SENTENCES_BY_FU = {1: 8, 2: 6, 3: 15, 4: 20, 5: 20, 6: 3, 7: 3}
-MAX_WORDS_BY_FU = {1: 170, 2: 120, 3: 300, 4: 400, 5: 350, 6: 60, 7: 40}
-NO_SHOW_MAX_SENTENCES_BY_FU = {1: 4, 2: 5, 3: 5, 4: 5, 5: 2}
-NO_SHOW_MAX_WORDS_BY_FU = {1: 80, 2: 80, 3: 80, 4: 80, 5: 30}
+MAX_SENTENCES_BY_FU = {1: 8, 2: 6, 3: 20, 4: 25, 5: 20, 6: 3, 7: 3}
+MAX_WORDS_BY_FU = {1: 170, 2: 120, 3: 400, 4: 500, 5: 350, 6: 60, 7: 40}
+NO_SHOW_MAX_SENTENCES_BY_FU = {1: 4, 2: 5, 3: 5, 4: 5, 5: 3}
+NO_SHOW_MAX_WORDS_BY_FU = {1: 80, 2: 80, 3: 80, 4: 80, 5: 50}
 
 # ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
@@ -603,6 +603,17 @@ def _lint_email_draft(draft: str, fu_number: int, days_since_call: int | None, p
         for keyword, label in named_resources.items():
             if keyword in dl and keyword in prior_text_lower:
                 issues.append(f'Duplicate resource: "{label}" was already shared in a prior email. Use a different resource.')
+
+    # Unsubstituted placeholders: catch {first_name}, {sender_signature}, etc.
+    # Allowed placeholders that are intentional: [CITY/DATES] (left for human to fill)
+    ALLOWED_PLACEHOLDERS = {"[CITY/DATES]"}
+    placeholder_curly = re.findall(r"\{[a-z_]+\}", d)
+    if placeholder_curly:
+        issues.append(f"Unsubstituted placeholder(s): {', '.join(placeholder_curly)}")
+    placeholder_bracket = re.findall(r"\[[A-Z][A-Z/ ]+\]", d)
+    for p in placeholder_bracket:
+        if p not in ALLOWED_PLACEHOLDERS:
+            issues.append(f"Unsubstituted placeholder: {p}")
 
     return issues
 
