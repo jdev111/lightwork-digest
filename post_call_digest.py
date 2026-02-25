@@ -101,7 +101,7 @@ CADENCE = {
     1: (1, "Post-call recap + tip",
         "Use this template, inserting a personalized tip from the sales scripts based on the call.\n"
         "IMPORTANT: Keep each paragraph as its own block separated by a blank line. Do NOT merge paragraphs into one block.\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Pleasure speaking with you today! Thanks for reaching out.\n\n"
         "A couple followup items: here's an <a href=\"https://www.lightworkhome.com/examplereport\">example report</a> "
         "(password: homehealth), and attached is the deck I presented with additional information.\n\n"
@@ -113,7 +113,7 @@ CADENCE = {
         "If no relevant topic came up on the call, omit the tip paragraph entirely."),
     2: (3, "Social proof",
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Hope you're doing well! Just wanted to check if you'd like to move forward with the assessment.\n\n"
         "Also wanted to share this recent write-up that "
         "<a href=\"https://x.com/awilkinson\">Andrew Wilkinson</a> (co-founder of Tiny) "
@@ -123,7 +123,7 @@ CADENCE = {
         "Best,\n{sender_signature}"),
     3: (6, "Key findings",
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Hope things are going well. One thing worth mentioning: we find issues in every home we test, "
         "regardless of how new or well-maintained it is. Here are a few recent examples:\n\n"
         "- Hidden mold contamination despite multiple previous professional tests which gave the 'all clear.' "
@@ -140,7 +140,7 @@ CADENCE = {
         "{sender_signature}"),
     4: (10, "Availability + Reviews",
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Just wanted to flag that we have some availability in [CITY/DATES], "
         "in case that works for you.\n\n"
         "Below are some of our reviews which gives a nice insight into the value our clients get from the service.\n\n"
@@ -161,7 +161,7 @@ CADENCE = {
         "{sender_signature}"),
     5: (16, "Clinical credibility",
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Wanted to share what a few of our doctor partners and customers have said about working with us:\n\n"
         "\"We regularly refer our patients to Lightwork Home Health because holistic care requires addressing "
         "the home environment. The science is clear: environmental factors have a major impact on health.\" "
@@ -182,7 +182,7 @@ CADENCE = {
         "We're here whenever you're ready.' Do NOT include a resource or tip. Just be human."),
     7: (90, "3-month check-in",
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "How's it been going with home health? Let me know if you have any questions or anything.\n\n"
         "{sender_signature}"),
 }
@@ -224,14 +224,14 @@ NO_SHOW_CADENCE = {
     2: (3, "Presentation deck",
         "Send the presentation deck. Keep it casual and helpful.\n\n"
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Wanted to send over our presentation deck in case it's helpful. "
         "It covers what we test, how the process works, and what our clients typically find.\n\n"
         "Here's my link if you'd like to rebook a call: {booking_link}\n\n"
         "{sender_signature}"),
     3: (7, "Andrew Wilkinson write-up",
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Wanted to share this recent write-up that "
         "<a href=\"https://x.com/awilkinson\">Andrew Wilkinson</a> (co-founder of Tiny) "
         "did on our service. Here's <a href=\"https://www.lightworkhome.com/blog-posts/wilkinson\">the link.</a>\n\n"
@@ -239,7 +239,7 @@ NO_SHOW_CADENCE = {
         "{sender_signature}"),
     4: (14, "Example report",
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Thought you might find this useful. Here's an "
         "<a href=\"https://www.lightworkhome.com/examplereport\">example report</a> "
         "(password: homehealth) so you can see exactly what we deliver.\n\n"
@@ -247,7 +247,7 @@ NO_SHOW_CADENCE = {
         "{sender_signature}"),
     5: (30, "Graceful close",
         "Use this EXACT template:\n\n"
-        "Hey {first_name},\n\n"
+        "Hi {first_name},\n\n"
         "Just wanted to leave the door open. We're here whenever you're ready.\n\n"
         "{sender_signature}"),
 }
@@ -2354,7 +2354,7 @@ IMPORTANT RULES:
 - Do NOT use "thought you might find this interesting/helpful" or similar filler openers (unless it's part of a fixed template). Vary your openers.
 - Never use em dashes.
 - Do NOT repeat ANY resource or talking point from prior emails.
-- Vary your openings. Not every email should start "Hey {{name}}, [reference to call]."
+- Vary your openings. Not every email should start "Hi {{name}}, [reference to call]."
 - Use the lead's first name ("{first_name}") in the greeting, not their full name.
 - LINKS: Only use links from the allowlist above.
 - FORMATTING: Each paragraph MUST be separated by a blank line. Never merge multiple paragraphs into one block of text. The greeting, each body paragraph, the CTA, and the signature should each be their own block."""
