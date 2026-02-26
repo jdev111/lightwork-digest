@@ -2028,6 +2028,7 @@ ALLOWED_RECIPIENT_EMAILS = {
     "jay@lightworkhome.com",
     "johnny@lightworkhome.com",
     "dom@lightworkhome.com",
+    "josh@lightworkhome.com",
 }
 
 
@@ -2036,10 +2037,17 @@ def _send_owner_reminders(action_items_by_owner, date_str):
 
     Skips gracefully if SMTP credentials are not configured.
     SAFETY: Only sends to addresses in ALLOWED_RECIPIENT_EMAILS.
+
+    Returns:
+        (sent, failed, skipped) counts so the caller can detect failures.
     """
     if not SMTP_EMAIL or not SMTP_PASSWORD:
         print("\n  SMTP credentials not set (SMTP_EMAIL / SMTP_PASSWORD in .env). Skipping email delivery.")
-        return
+        return (0, 0, len(action_items_by_owner))
+
+    sent = 0
+    failed = 0
+    skipped = 0
 
     for owner, items in action_items_by_owner.items():
         if not items:
@@ -2047,9 +2055,11 @@ def _send_owner_reminders(action_items_by_owner, date_str):
         recipient = OWNER_TO_EMAIL.get(owner)
         if not recipient:
             print(f"  No email address for owner '{owner}', skipping reminder.")
+            skipped += 1
             continue
         if recipient not in ALLOWED_RECIPIENT_EMAILS:
             print(f"  BLOCKED: {recipient} is not in the allowed recipient list. Skipping.")
+            skipped += 1
             continue
 
         lead_count = len(items)
@@ -2155,8 +2165,15 @@ def _send_owner_reminders(action_items_by_owner, date_str):
                 server.login(SMTP_EMAIL, SMTP_PASSWORD)
                 server.send_message(msg)
             print(f"  Reminder sent to {owner} ({recipient}): {lead_count} lead{'s' if lead_count != 1 else ''}")
+            sent += 1
         except Exception as e:
             print(f"  Error sending to {owner} ({recipient}): {e}")
+            failed += 1
+
+    # Summary
+    total = sent + failed + skipped
+    print(f"\n  Email summary: {sent} sent, {failed} failed, {skipped} skipped (of {total} owners)")
+    return (sent, failed, skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -3880,13 +3897,20 @@ def main():
         all_action_items.setdefault(o, []).extend(items)
     for o, items in action_items_by_owner_noshow.items():
         all_action_items.setdefault(o, []).extend(items)
+    email_failed = False
     if not args.no_email and all_action_items:
         print("\nSending follow-up reminders...")
-        _send_owner_reminders(all_action_items, date_str)
+        sent, failed, _skipped = _send_owner_reminders(all_action_items, date_str)
+        if failed > 0 and sent == 0:
+            email_failed = True
 
     # Close caches
     draft_db.close()
     transcript_db.close()
+
+    if email_failed:
+        print("\nERROR: All email sends failed. Check SMTP credentials.")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
