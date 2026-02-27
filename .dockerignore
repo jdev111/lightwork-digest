@@ -1,0 +1,10 @@
+.env
+.git/
+__pycache__/
+*.py[cod]
+*.log
+*_preview.html
+gmail-webhook/
+gmail_webhook.gs
+.claude/
+.railwayignore

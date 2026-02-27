@@ -1,0 +1,5 @@
+[build]
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# TEMP: disabled cron to test. Restore to: cronSchedule = "0 13 * * *"
