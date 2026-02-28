@@ -2339,6 +2339,18 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
     max_touches = len(cadence)
     day_offset, fu_type, fu_instructions = cadence[fu_number]
 
+    # Override Wilkinson-specific templates when lead was referred by Wilkinson
+    source = custom.get("How did you hear about us?", "N/A")
+    source_lower = (source or "").lower()
+    if ("wilkinson" in source_lower or "andrew" in source_lower) and "wilkinson" in fu_instructions.lower():
+        fu_instructions = (
+            "Write a short, natural follow-up email. Share the example report "
+            "(https://www.lightworkhome.com/examplereport, password: homehealth) "
+            "or client reviews (https://www.lightworkhome.com/reviews) as social proof. "
+            "Do NOT mention Andrew Wilkinson or link to the Wilkinson write-up. "
+            "This lead was referred by Andrew Wilkinson so they already know him."
+        )
+
     # Substitute booking link placeholder in no-show cadence instructions
     if cadence_type == "no_show" and "{booking_link}" in fu_instructions:
         sender = owner_name if owner_name in OWNER_SIGNATURE else "Jay"
@@ -2444,7 +2456,6 @@ IMPORTANT RULES:
 
     # Skip Wilkinson content for leads referred by Andrew Wilkinson
     referral_note = ""
-    source_lower = source.lower() if source else ""
     if "wilkinson" in source_lower or "andrew" in source_lower:
         referral_note = "\nIMPORTANT: This lead was referred by Andrew Wilkinson. Do NOT include the Wilkinson write-up, Wilkinson blog post, Wilkinson testimonial, or any Andrew Wilkinson reference. They already know him and have likely read it. Use a different resource instead."
 
