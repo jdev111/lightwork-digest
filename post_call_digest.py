@@ -2341,7 +2341,10 @@ def generate_digest_for_call(lead_info, call_notes, meeting, owner_name="Jay",
 
     # Override Wilkinson-specific templates when lead was referred by Wilkinson
     source = custom.get("How did you hear about us?", "N/A")
-    source_lower = (source or "").lower()
+    referral = custom.get("Referral?", "")
+    if isinstance(referral, list):
+        referral = " ".join(referral)
+    source_lower = f"{source or ''} {referral or ''}".lower()
     if ("wilkinson" in source_lower or "andrew" in source_lower) and "wilkinson" in fu_instructions.lower():
         fu_instructions = (
             "Write a short, natural follow-up email. Share the example report "
