@@ -1,6 +1,10 @@
 #!/bin/bash
 # Run the digest once per day. If the laptop was off at 8am ET,
 # it catches up whenever the Mac wakes up (between 7am-9pm ET).
+#
+# Railway handles the 8am ET run with email sending.
+# This local run generates the HTML preview only (no emails)
+# so Jay can review drafts in the browser.
 
 HOUR_ET=$(TZ="America/New_York" date +"%H")
 TODAY=$(TZ="America/New_York" date +"%Y-%m-%d")
@@ -19,10 +23,7 @@ if [ -f "$LOCK_FILE" ]; then
     fi
 fi
 
-# Run the digest
-/opt/homebrew/bin/python3 /Users/dillandevram/Desktop/claude-projects/lightwork-digest/post_call_digest.py
-
-# Mark today as done (only if the script succeeded)
-if [ $? -eq 0 ]; then
+# Run the digest locally (no emails, Railway handles that)
+if /opt/homebrew/bin/python3 /Users/dillandevram/Desktop/claude-projects/lightwork-digest/post_call_digest.py --no-email; then
     echo "$TODAY" > "$LOCK_FILE"
 fi
